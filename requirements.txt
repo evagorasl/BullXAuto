@@ -1,0 +1,11 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+selenium==4.23.1
+webdriver-manager==4.0.2
+sqlalchemy
+pydantic==2.5.0
+python-multipart==0.0.6
+asyncio-mqtt==0.16.1
+apscheduler==3.10.4
+requests==2.31.0
+python-dotenv==1.0.0

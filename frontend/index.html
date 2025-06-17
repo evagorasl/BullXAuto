@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BullX Automation Dashboard</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><i class="fas fa-robot"></i> BullX Automation Dashboard</h1>
+            <div id="profile-info" class="hidden">
+                <span id="profile-name"></span>
+                <button id="logout-btn" class="btn btn-danger">Logout</button>
+            </div>
+        </header>
+
+        <div id="login-section" class="card">
+            <h2>Login</h2>
+            <div class="form-group">
+                <label for="api-key">API Key</label>
+                <input type="password" id="api-key" placeholder="Enter your API key (starts with bullx_)">
+            </div>
+            <button id="login-btn" class="btn btn-primary">Login</button>
+            <div id="login-message" class="message"></div>
+        </div>
+
+        <div id="dashboard" class="hidden">
+            <div class="dashboard-grid">
+                <!-- Search Section -->
+                <div class="card">
+                    <h2>Search Token</h2>
+                    <div class="form-group">
+                        <label for="token-address">Token Address</label>
+                        <input type="text" id="token-address" placeholder="Enter token address">
+                    </div>
+                    <button id="search-btn" class="btn btn-primary">Search</button>
+                    <div id="search-result" class="result-box hidden">
+                        <h3>Search Result</h3>
+                        <div id="search-details"></div>
+                    </div>
+                </div>
+
+                <!-- Strategy Section -->
+                <div class="card">
+                    <h2>Execute Strategy</h2>
+                    <div class="form-group">
+                        <label for="strategy-address">Token Address</label>
+                        <input type="text" id="strategy-address" placeholder="Enter token address">
+                    </div>
+                    <div class="form-group">
+                        <label for="strategy-number">Strategy</label>
+                        <select id="strategy-number">
+                            <option value="1">Strategy 1 (Conservative)</option>
+                            <option value="2">Strategy 2 (Aggressive)</option>
+                            <option value="3">Strategy 3 (Market Cap Based)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="order-type">Order Type</label>
+                        <select id="order-type">
+                            <option value="BUY">BUY</option>
+                            <option value="SELL">SELL</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Advanced Options</label>
+                        <div class="toggle-container">
+                            <input type="checkbox" id="advanced-toggle">
+                            <label for="advanced-toggle" class="toggle-label"></label>
+                            <span>Show Advanced Options</span>
+                        </div>
+                    </div>
+                    <div id="advanced-options" class="hidden">
+                        <div class="form-group">
+                            <label for="entry-price">Entry Price (optional)</label>
+                            <input type="number" id="entry-price" placeholder="Auto-calculated if empty">
+                        </div>
+                        <div class="form-group">
+                            <label for="take-profit">Take Profit (optional)</label>
+                            <input type="number" id="take-profit" placeholder="Auto-calculated if empty">
+                        </div>
+                        <div class="form-group">
+                            <label for="stop-loss">Stop Loss (optional)</label>
+                            <input type="number" id="stop-loss" placeholder="Auto-calculated if empty">
+                        </div>
+                    </div>
+                    <button id="strategy-btn" class="btn btn-primary">Execute Strategy</button>
+                    <div id="strategy-result" class="result-box hidden">
+                        <h3>Strategy Result</h3>
+                        <div id="strategy-details"></div>
+                    </div>
+                </div>
+
+                <!-- Active Orders Section -->
+                <div class="card full-width">
+                    <h2>Active Orders</h2>
+                    <button id="refresh-orders-btn" class="btn btn-secondary">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                    <div class="table-container">
+                        <table id="orders-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Token</th>
+                                    <th>Strategy</th>
+                                    <th>Type</th>
+                                    <th>Entry Price</th>
+                                    <th>Take Profit</th>
+                                    <th>Stop Loss</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                </tr>
+                            </thead>
+                            <tbody id="orders-body">
+                                <!-- Orders will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <div id="no-orders-message" class="message">No active orders found.</div>
+                </div>
+
+                <!-- Coins Database Section -->
+                <div class="card full-width">
+                    <h2>Coins Database</h2>
+                    <button id="refresh-coins-btn" class="btn btn-secondary">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                    <div class="table-container">
+                        <table id="coins-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Address</th>
+                                    <th>Market Cap</th>
+                                    <th>Current Price</th>
+                                    <th>Last Updated</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="coins-body">
+                                <!-- Coins will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <div id="no-coins-message" class="message">No coins found in database.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>BullX Automation Dashboard &copy; 2025</p>
+        <p><a href="http://localhost:8000/docs" target="_blank">API Documentation</a></p>
+    </footer>
+
+    <!-- Modal for displaying coin orders -->
+    <div id="orders-modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2>Orders for <span id="modal-coin-name"></span></h2>
+            <div class="table-container">
+                <table id="modal-orders-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Strategy</th>
+                            <th>Type</th>
+                            <th>Entry Price</th>
+                            <th>Take Profit</th>
+                            <th>Stop Loss</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="modal-orders-body">
+                        <!-- Orders will be populated here -->
+                    </tbody>
+                </table>
+            </div>
+            <div id="modal-no-orders" class="message">No orders found for this coin.</div>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

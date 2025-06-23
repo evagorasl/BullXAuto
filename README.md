@@ -1,3 +1,4 @@
+# THIS IS A WORK IN PROGRESS
 # BullXAuto
 
 A Python automation system for trading processes on neo.bullx.io using FastAPI and Selenium, with a web-based dashboard for easy management.

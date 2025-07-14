@@ -17,6 +17,7 @@ class Coin(Base):
     url = Column(String, nullable=True)  # URL to the coin on BullX
     market_cap = Column(Float, nullable=True)  # Current market cap
     current_price = Column(Float, nullable=True)  # Current price
+    bracket = Column(Integer, nullable=True)  # Market cap bracket (1-5 based on market cap ranges)
     last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
     created_at = Column(DateTime, default=func.now())
     
@@ -24,7 +25,7 @@ class Coin(Base):
     orders = relationship("Order", back_populates="coin")
     
     def __repr__(self):
-        return f"<Coin(name='{self.name}', address='{self.address}', market_cap={self.market_cap})>"
+        return f"<Coin(name='{self.name}', address='{self.address}', market_cap={self.market_cap}, bracket={self.bracket})>"
 
 class Order(Base):
     __tablename__ = "orders"
@@ -33,6 +34,7 @@ class Order(Base):
     coin_id = Column(Integer, ForeignKey("coins.id"), nullable=False)
     strategy_number = Column(Integer, nullable=False)
     order_type = Column(String, nullable=False)  # BUY or SELL
+    bracket_id = Column(Integer, nullable=False)  # 1-4, identifies which sub-order this is within the bracket
     market_cap = Column(Float, nullable=False)  # Market cap at time of order
     entry_price = Column(Float, nullable=False)
     take_profit = Column(Float, nullable=False)
@@ -49,7 +51,7 @@ class Order(Base):
     coin = relationship("Coin", back_populates="orders")
     
     def __repr__(self):
-        return f"<Order(id={self.id}, coin_id={self.coin_id}, type='{self.order_type}', status='{self.status}')>"
+        return f"<Order(id={self.id}, coin_id={self.coin_id}, bracket_id={self.bracket_id}, type='{self.order_type}', status='{self.status}')>"
 
 class Profile(Base):
     __tablename__ = "profiles"
@@ -93,6 +95,7 @@ class CoinResponse(BaseModel):
     url: Optional[str]
     market_cap: Optional[float]
     current_price: Optional[float]
+    bracket: Optional[int]
     last_updated: datetime
     
     class Config:
@@ -103,6 +106,7 @@ class OrderResponse(BaseModel):
     coin_id: int
     strategy_number: int
     order_type: str
+    bracket_id: int
     market_cap: float
     entry_price: float
     take_profit: float
@@ -121,6 +125,7 @@ class OrderDetailResponse(BaseModel):
     coin: CoinResponse
     strategy_number: int
     order_type: str
+    bracket_id: int
     market_cap: float
     entry_price: float
     take_profit: float
@@ -133,3 +138,33 @@ class OrderDetailResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+# New models for multi-order system
+class MultiOrderRequest(BaseModel):
+    strategy_number: int
+    address: str
+    order_type: str  # BUY or SELL
+    orders: List['SubOrderRequest']  # List of 4 sub-orders
+
+class SubOrderRequest(BaseModel):
+    bracket_id: int  # 1-4
+    entry_price: float
+    take_profit: float
+    stop_loss: float
+    amount: Optional[float] = None
+
+class MultiOrderResponse(BaseModel):
+    success: bool
+    message: str
+    coin: CoinResponse
+    orders: List[OrderResponse]
+    total_orders_created: int
+    
+class BracketInfo(BaseModel):
+    bracket: int
+    min_market_cap: float
+    max_market_cap: float
+    description: str
+
+# Update forward references
+MultiOrderRequest.model_rebuild()

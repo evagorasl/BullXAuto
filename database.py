@@ -269,5 +269,208 @@ class DatabaseManager:
         finally:
             db.close()
 
+    def calculate_bracket(self, market_cap: float) -> int:
+        """Calculate bracket based on market cap"""
+        if market_cap < 100000:  # < 100K
+            return 1
+        elif market_cap < 500000:  # 100K - 500K
+            return 2
+        elif market_cap < 1000000:  # 500K - 1M
+            return 3
+        elif market_cap < 5000000:  # 1M - 5M
+            return 4
+        else:  # > 5M
+            return 5
+    
+    def get_bracket_info(self, bracket: int) -> dict:
+        """Get bracket information"""
+        bracket_ranges = {
+            1: {"min": 0, "max": 100000, "description": "Micro Cap (< 100K)"},
+            2: {"min": 100000, "max": 500000, "description": "Small Cap (100K - 500K)"},
+            3: {"min": 500000, "max": 1000000, "description": "Medium Cap (500K - 1M)"},
+            4: {"min": 1000000, "max": 5000000, "description": "Large Cap (1M - 5M)"},
+            5: {"min": 5000000, "max": float('inf'), "description": "Mega Cap (> 5M)"}
+        }
+        return bracket_ranges.get(bracket, bracket_ranges[1])
+    
+    def get_next_bracket_id(self, coin_id: int, profile_name: str) -> int:
+        """Get the next available bracket_id (1-4) for a coin and profile"""
+        db = self.SessionLocal()
+        try:
+            # Get all active orders for this coin and profile
+            active_orders = db.query(Order).filter(
+                Order.coin_id == coin_id,
+                Order.profile_name == profile_name,
+                Order.status == "ACTIVE"
+            ).all()
+            
+            # Get used bracket_ids
+            used_bracket_ids = {order.bracket_id for order in active_orders}
+            
+            # Find the first available bracket_id (1-4)
+            for bracket_id in range(1, 5):
+                if bracket_id not in used_bracket_ids:
+                    return bracket_id
+            
+            # If all bracket_ids are used, return None or raise an exception
+            return None
+        finally:
+            db.close()
+    
+    def create_multi_order(self, address: str, strategy_number: int, order_type: str, 
+                          profile_name: str, sub_orders: list) -> dict:
+        """Create multiple orders for a coin (up to 4 orders with different bracket_ids)"""
+        db = self.SessionLocal()
+        try:
+            # Get or create the coin
+            coin = db.query(Coin).filter(Coin.address == address).first()
+            if not coin:
+                coin = Coin(address=address)
+                db.add(coin)
+                db.flush()  # Get the coin ID without committing
+            
+            # Update coin bracket if market_cap is available
+            if coin.market_cap:
+                coin.bracket = self.calculate_bracket(coin.market_cap)
+            
+            created_orders = []
+            
+            # Validate that we don't exceed 4 orders per coin per profile
+            existing_active_count = db.query(Order).filter(
+                Order.coin_id == coin.id,
+                Order.profile_name == profile_name,
+                Order.status == "ACTIVE"
+            ).count()
+            
+            if existing_active_count + len(sub_orders) > 4:
+                raise ValueError(f"Cannot create {len(sub_orders)} orders. Maximum 4 active orders per coin per profile. Currently active: {existing_active_count}")
+            
+            # Create each sub-order
+            for sub_order in sub_orders:
+                # Check if bracket_id is already used
+                existing_order = db.query(Order).filter(
+                    Order.coin_id == coin.id,
+                    Order.profile_name == profile_name,
+                    Order.bracket_id == sub_order['bracket_id'],
+                    Order.status == "ACTIVE"
+                ).first()
+                
+                if existing_order:
+                    raise ValueError(f"Bracket ID {sub_order['bracket_id']} is already in use for this coin and profile")
+                
+                # Create the order
+                order_data = {
+                    "coin_id": coin.id,
+                    "strategy_number": strategy_number,
+                    "order_type": order_type.upper(),
+                    "bracket_id": sub_order['bracket_id'],
+                    "market_cap": coin.market_cap or 0,
+                    "entry_price": sub_order['entry_price'],
+                    "take_profit": sub_order['take_profit'],
+                    "stop_loss": sub_order['stop_loss'],
+                    "amount": sub_order.get('amount'),
+                    "profile_name": profile_name
+                }
+                
+                order = Order(**order_data)
+                db.add(order)
+                created_orders.append(order)
+            
+            db.commit()
+            
+            # Refresh all orders to get their IDs
+            for order in created_orders:
+                db.refresh(order)
+            
+            return {
+                "success": True,
+                "coin": coin,
+                "orders": created_orders,
+                "total_orders_created": len(created_orders)
+            }
+            
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+    
+    def replace_order(self, coin_id: int, bracket_id: int, profile_name: str, 
+                     new_order_data: dict) -> Order:
+        """Replace a completed/stopped order with a new one maintaining the same bracket_id"""
+        db = self.SessionLocal()
+        try:
+            # Mark the old order as replaced (if it exists and is active)
+            old_order = db.query(Order).filter(
+                Order.coin_id == coin_id,
+                Order.bracket_id == bracket_id,
+                Order.profile_name == profile_name,
+                Order.status == "ACTIVE"
+            ).first()
+            
+            if old_order:
+                old_order.status = "REPLACED"
+                old_order.completed_at = datetime.now()
+            
+            # Create new order with the same bracket_id
+            new_order_data["coin_id"] = coin_id
+            new_order_data["bracket_id"] = bracket_id
+            new_order_data["profile_name"] = profile_name
+            
+            new_order = Order(**new_order_data)
+            db.add(new_order)
+            db.commit()
+            db.refresh(new_order)
+            
+            return new_order
+            
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+    
+    def get_orders_by_bracket(self, coin_id: int, bracket_id: int, 
+                             profile_name: str = None) -> List[Order]:
+        """Get orders by coin and bracket_id, optionally filtered by profile"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(Order).filter(
+                Order.coin_id == coin_id,
+                Order.bracket_id == bracket_id
+            )
+            
+            if profile_name:
+                query = query.filter(Order.profile_name == profile_name)
+            
+            return query.all()
+        finally:
+            db.close()
+    
+    def get_active_orders_summary(self, profile_name: str) -> dict:
+        """Get a summary of active orders grouped by coin and bracket_id"""
+        db = self.SessionLocal()
+        try:
+            orders = db.query(Order).filter(
+                Order.profile_name == profile_name,
+                Order.status == "ACTIVE"
+            ).all()
+            
+            summary = {}
+            for order in orders:
+                coin_address = order.coin.address
+                if coin_address not in summary:
+                    summary[coin_address] = {
+                        "coin": order.coin,
+                        "bracket": order.coin.bracket,
+                        "orders": {}
+                    }
+                
+                summary[coin_address]["orders"][order.bracket_id] = order
+            
+            return summary
+        finally:
+            db.close()
+
 # Global database manager instance
 db_manager = DatabaseManager()

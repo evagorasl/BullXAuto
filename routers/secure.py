@@ -6,7 +6,8 @@ import logging
 from models import (
     LoginRequest, SearchRequest, StrategyRequest, 
     OrderResponse, ProfileResponse, Profile, 
-    CoinResponse, OrderDetailResponse
+    CoinResponse, OrderDetailResponse, MultiOrderRequest,
+    MultiOrderResponse, SubOrderRequest, BracketInfo
 )
 from database import db_manager
 from chrome_driver import bullx_automator, chrome_driver_manager
@@ -215,6 +216,190 @@ async def close_driver(current_profile: Profile = Depends(get_current_profile)):
         }
     except Exception as e:
         logger.error(f"Error closing driver: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# New multi-order endpoints
+@router.post("/multi-order", response_model=MultiOrderResponse)
+async def create_multi_order(request: MultiOrderRequest, current_profile: Profile = Depends(get_current_profile)):
+    """Create multiple orders for a coin (up to 4 orders with different bracket_ids)"""
+    try:
+        logger.info(f"Multi-order request for address: {request.address} using profile: {current_profile.name}")
+        
+        # Validate order type
+        if request.order_type.upper() not in ["BUY", "SELL"]:
+            raise HTTPException(status_code=400, detail="Order type must be 'BUY' or 'SELL'")
+        
+        # Validate bracket_ids are unique and within range
+        bracket_ids = [order.bracket_id for order in request.orders]
+        if len(set(bracket_ids)) != len(bracket_ids):
+            raise HTTPException(status_code=400, detail="Bracket IDs must be unique")
+        
+        if not all(1 <= bid <= 4 for bid in bracket_ids):
+            raise HTTPException(status_code=400, detail="Bracket IDs must be between 1 and 4")
+        
+        if len(request.orders) > 4:
+            raise HTTPException(status_code=400, detail="Maximum 4 orders allowed per coin")
+        
+        # Convert to dict format for database
+        sub_orders = []
+        for order in request.orders:
+            sub_orders.append({
+                'bracket_id': order.bracket_id,
+                'entry_price': order.entry_price,
+                'take_profit': order.take_profit,
+                'stop_loss': order.stop_loss,
+                'amount': order.amount
+            })
+        
+        # Create multi-order
+        result = db_manager.create_multi_order(
+            address=request.address,
+            strategy_number=request.strategy_number,
+            order_type=request.order_type.upper(),
+            profile_name=current_profile.name,
+            sub_orders=sub_orders
+        )
+        
+        if result["success"]:
+            return MultiOrderResponse(
+                success=True,
+                message=f"Successfully created {result['total_orders_created']} orders for {request.address}",
+                coin=CoinResponse.from_orm(result["coin"]),
+                orders=[OrderResponse.from_orm(order) for order in result["orders"]],
+                total_orders_created=result["total_orders_created"]
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Multi-order creation failed")
+            
+    except ValueError as e:
+        logger.error(f"Multi-order validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Multi-order creation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/replace-order/{coin_address}/{bracket_id}")
+async def replace_order(
+    coin_address: str,
+    bracket_id: int,
+    new_order: SubOrderRequest,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Replace a completed/stopped order with a new one maintaining the same bracket_id"""
+    try:
+        logger.info(f"Replace order request for {coin_address}, bracket_id: {bracket_id}")
+        
+        # Validate bracket_id
+        if not 1 <= bracket_id <= 4:
+            raise HTTPException(status_code=400, detail="Bracket ID must be between 1 and 4")
+        
+        # Get coin
+        coin = db_manager.get_coin_by_address(coin_address)
+        if not coin:
+            raise HTTPException(status_code=404, detail=f"Coin with address {coin_address} not found")
+        
+        # Prepare new order data
+        new_order_data = {
+            "strategy_number": 1,  # Default strategy, you might want to make this configurable
+            "order_type": "BUY",   # Default type, you might want to make this configurable
+            "market_cap": coin.market_cap or 0,
+            "entry_price": new_order.entry_price,
+            "take_profit": new_order.take_profit,
+            "stop_loss": new_order.stop_loss,
+            "amount": new_order.amount
+        }
+        
+        # Replace the order
+        replaced_order = db_manager.replace_order(
+            coin_id=coin.id,
+            bracket_id=bracket_id,
+            profile_name=current_profile.name,
+            new_order_data=new_order_data
+        )
+        
+        return {
+            "success": True,
+            "message": f"Order replaced successfully for bracket_id {bracket_id}",
+            "order": OrderResponse.from_orm(replaced_order)
+        }
+        
+    except Exception as e:
+        logger.error(f"Replace order error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/orders-summary")
+async def get_orders_summary(current_profile: Profile = Depends(get_current_profile)):
+    """Get a summary of active orders grouped by coin and bracket_id"""
+    try:
+        summary = db_manager.get_active_orders_summary(current_profile.name)
+        
+        # Convert to a more API-friendly format
+        formatted_summary = {}
+        for address, data in summary.items():
+            formatted_summary[address] = {
+                "coin": CoinResponse.from_orm(data["coin"]),
+                "bracket": data["bracket"],
+                "orders": {
+                    str(bracket_id): OrderResponse.from_orm(order) 
+                    for bracket_id, order in data["orders"].items()
+                }
+            }
+        
+        return {
+            "success": True,
+            "summary": formatted_summary,
+            "total_coins": len(formatted_summary)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting orders summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/brackets", response_model=List[BracketInfo])
+async def get_bracket_info(current_profile: Profile = Depends(get_current_profile)):
+    """Get information about market cap brackets"""
+    try:
+        brackets = []
+        for bracket in range(1, 6):  # Brackets 1-5
+            info = db_manager.get_bracket_info(bracket)
+            brackets.append(BracketInfo(
+                bracket=bracket,
+                min_market_cap=info["min"],
+                max_market_cap=info["max"],
+                description=info["description"]
+            ))
+        
+        return brackets
+        
+    except Exception as e:
+        logger.error(f"Error getting bracket info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/coins/{address}/next-bracket-id")
+async def get_next_bracket_id(address: str, current_profile: Profile = Depends(get_current_profile)):
+    """Get the next available bracket_id for a coin"""
+    try:
+        coin = db_manager.get_coin_by_address(address)
+        if not coin:
+            raise HTTPException(status_code=404, detail=f"Coin with address {address} not found")
+        
+        next_bracket_id = db_manager.get_next_bracket_id(coin.id, current_profile.name)
+        
+        if next_bracket_id is None:
+            return {
+                "success": False,
+                "message": "All bracket IDs (1-4) are currently in use for this coin",
+                "next_bracket_id": None
+            }
+        
+        return {
+            "success": True,
+            "next_bracket_id": next_bracket_id,
+            "message": f"Next available bracket ID is {next_bracket_id}"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting next bracket ID: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def calculate_strategy_prices(strategy_number: int, market_cap: float, order_type: str) -> dict:

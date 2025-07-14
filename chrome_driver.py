@@ -170,7 +170,7 @@ class BullXAutomator:
         except Exception as e:
             logger.error(f"Search failed for address {address}: {e}")
             return False, {}
-    
+
     def _extract_coin_data(self, driver, address: str) -> dict:
         """Extract coin information from the page"""
         try:

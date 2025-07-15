@@ -208,7 +208,7 @@ async function handleSearch() {
             }
             
             if (coinInfo.market_cap) {
-                html += `<p><strong>Market Cap1:</strong> $${formatNumber(coinInfo.market_cap)}</p>`;
+                html += `<p><strong>Market Cap:</strong> $${formatNumber(coinInfo.market_cap)}</p>`;
             }
             
             if (coinInfo.bracket) {

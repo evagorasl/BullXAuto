@@ -12,6 +12,7 @@ from models import (
 from database import db_manager
 from chrome_driver import bullx_automator, chrome_driver_manager
 from auth import get_current_profile
+from bracket_config import get_bracket_info, calculate_order_parameters, BRACKET_CONFIG
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -54,12 +55,28 @@ async def search_address(request: SearchRequest, current_profile: Profile = Depe
         
         # Perform search
         success = bullx_automator.search_address(current_profile.name, request.address)
-        db_manager.get_coin_by_address(request.address)
+        
         if success:
+            # Get the coin data
+            coin = db_manager.get_coin_by_address(request.address)
+            
+            # If coin exists and has market cap, update its bracket
+            if coin and coin.market_cap:
+                from bracket_config import calculate_bracket
+                new_bracket = calculate_bracket(coin.market_cap)
+                
+                # Update coin with new bracket if it changed
+                if coin.bracket != new_bracket:
+                    db_manager.create_or_update_coin(
+                        address=request.address,
+                        data={"bracket": new_bracket}
+                    )
+                    coin = db_manager.get_coin_by_address(request.address)  # Refresh coin data
+            
             return {
                 "success": True,
                 "message": f"Successfully searched for address: {request.address}",
-                "coin_data" : db_manager.get_coin_by_address(request.address),
+                "coin_data": coin,
                 "profile": current_profile.name
             }
         else:
@@ -400,6 +417,120 @@ async def get_next_bracket_id(address: str, current_profile: Profile = Depends(g
         
     except Exception as e:
         logger.error(f"Error getting next bracket ID: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# New bracket-based endpoints
+@router.post("/auto-multi-order")
+async def create_auto_multi_order(
+    address: str,
+    strategy_number: int,
+    order_type: str,
+    total_amount: float,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Create multiple orders automatically using bracket configuration"""
+    try:
+        logger.info(f"Auto multi-order request for address: {address} using profile: {current_profile.name}")
+        
+        # Validate order type
+        if order_type.upper() not in ["BUY", "SELL"]:
+            raise HTTPException(status_code=400, detail="Order type must be 'BUY' or 'SELL'")
+        
+        # Validate total amount
+        if total_amount <= 0:
+            raise HTTPException(status_code=400, detail="Total amount must be greater than 0")
+        
+        # Create multi-order using bracket configuration
+        result = db_manager.create_multi_order_with_bracket_config(
+            address=address,
+            strategy_number=strategy_number,
+            order_type=order_type.upper(),
+            profile_name=current_profile.name,
+            total_amount=total_amount
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Successfully created {result['total_orders_created']} orders using bracket configuration",
+                "coin": CoinResponse.from_orm(result["coin"]),
+                "orders": [OrderResponse.from_orm(order) for order in result["orders"]],
+                "total_orders_created": result["total_orders_created"],
+                "total_amount": total_amount
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Auto multi-order creation failed")
+            
+    except ValueError as e:
+        logger.error(f"Auto multi-order validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Auto multi-order creation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/coins/{address}/bracket-orders")
+async def get_bracket_order_preview(
+    address: str,
+    total_amount: float,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Preview what orders would be created using bracket configuration"""
+    try:
+        # Get coin
+        coin = db_manager.get_coin_by_address(address)
+        if not coin:
+            raise HTTPException(status_code=404, detail=f"Coin with address {address} not found")
+        
+        if not coin.market_cap:
+            raise HTTPException(status_code=400, detail="Cannot preview orders: coin market cap is not available")
+        
+        # Calculate bracket
+        from bracket_config import calculate_bracket
+        bracket = calculate_bracket(coin.market_cap)
+        
+        # Get order parameters
+        order_params = calculate_order_parameters(
+            bracket=bracket,
+            total_amount=total_amount,
+            current_price=coin.current_price
+        )
+        
+        # Get bracket info
+        bracket_info = get_bracket_info(bracket)
+        
+        return {
+            "success": True,
+            "coin": CoinResponse.from_orm(coin),
+            "bracket": bracket,
+            "bracket_info": bracket_info,
+            "total_amount": total_amount,
+            "preview_orders": order_params
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting bracket order preview: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/bracket-config")
+async def get_bracket_config(current_profile: Profile = Depends(get_current_profile)):
+    """Get the current bracket configuration"""
+    try:
+        from bracket_config import BRACKET_CONFIG, TRADE_SIZES, TAKE_PROFIT_PERCENTAGES, BRACKET_RANGES
+        
+        config = {
+            "bracket_ranges": BRACKET_RANGES,
+            "trade_sizes": TRADE_SIZES,
+            "take_profit_percentages": TAKE_PROFIT_PERCENTAGES,
+            "bracket_config": BRACKET_CONFIG
+        }
+        
+        return {
+            "success": True,
+            "config": config
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting bracket config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def calculate_strategy_prices(strategy_number: int, market_cap: float, order_type: str) -> dict:

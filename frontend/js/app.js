@@ -186,8 +186,14 @@ async function handleSearch() {
         // If search is successful, get the coin data
         let html = '';
         if (searchResponse.success) {
-            // Get coin info from the database
-            const coinInfo = await api.getCoin(address);
+            // Get coin info from the search response or fetch it separately
+            let coinInfo = searchResponse.coin_data;
+            if (!coinInfo) {
+                coinInfo = await api.getCoin(address);
+            }
+            
+            console.log('Search response:', searchResponse);
+            console.log('Coin info:', coinInfo);
             
             // Display the result
             html = `
@@ -202,7 +208,17 @@ async function handleSearch() {
             }
             
             if (coinInfo.market_cap) {
-                html += `<p><strong>Market Cap:</strong> $${formatNumber(coinInfo.market_cap)}</p>`;
+                html += `<p><strong>Market Cap1:</strong> $${formatNumber(coinInfo.market_cap)}</p>`;
+            }
+            
+            if (coinInfo.bracket) {
+                const bracketInfo = getBracketDescription(coinInfo.bracket);
+                html += `<p><strong>Bracket:</strong> ${coinInfo.bracket} (${bracketInfo})</p>`;
+            } else if (coinInfo.market_cap) {
+                // Calculate bracket if not assigned
+                const bracket = calculateBracketFromMarketCap(coinInfo.market_cap);
+                const bracketInfo = getBracketDescription(bracket);
+                html += `<p><strong>Bracket:</strong> ${bracket} (${bracketInfo}) <em>- calculated</em></p>`;
             }
             
             if (coinInfo.current_price) {
@@ -211,6 +227,19 @@ async function handleSearch() {
             
             if (coinInfo.last_updated) {
                 html += `<p><strong>Last Updated:</strong> ${formatDate(coinInfo.last_updated)}</p>`;
+            }
+            
+            // Add bracket order preview if market cap is available
+            if (coinInfo.market_cap && coinInfo.bracket) {
+                html += `
+                    <div class="bracket-preview">
+                        <h4>Bracket Order Preview (for $1000 investment):</h4>
+                        <div id="bracket-preview-${coinInfo.id}" class="loading">Loading bracket preview...</div>
+                    </div>
+                `;
+                
+                // Load bracket preview asynchronously
+                loadBracketPreview(coinInfo.address, coinInfo.id, 1000);
             }
         } else {
             // If search failed, show a message
@@ -351,6 +380,8 @@ async function loadOrders() {
 async function loadCoins() {
     try {
         const coins = await api.getCoins();
+        console.log('Coins data:', coins);
+        
         const coinsBody = document.getElementById('coins-body');
         const noCoinsMessage = document.getElementById('no-coins-message');
         
@@ -367,13 +398,19 @@ async function loadCoins() {
         
         // Add new rows
         coins.forEach(coin => {
+            console.log('Processing coin:', coin);
             const row = document.createElement('tr');
+            
+            const bracketDisplay = coin.bracket ? 
+                `<span class="bracket-badge bracket-${coin.bracket}">${coin.bracket}</span>` : 
+                'N/A';
             
             row.innerHTML = `
                 <td>${coin.id}</td>
                 <td>${coin.name || 'Unknown'}</td>
                 <td>${truncateAddress(coin.address)}</td>
                 <td>${coin.market_cap ? '$' + formatNumber(coin.market_cap) : 'N/A'}</td>
+                <td>${bracketDisplay}</td>
                 <td>${coin.current_price ? '$' + coin.current_price : 'N/A'}</td>
                 <td>${formatDate(coin.last_updated)}</td>
                 <td>
@@ -492,4 +529,114 @@ function truncateAddress(address) {
     if (!address) return 'N/A';
     if (address.length <= 16) return address;
     return `${address.substring(0, 8)}...${address.substring(address.length - 8)}`;
+}
+
+/**
+ * Get bracket description based on bracket number
+ * @param {number} bracket - Bracket number (1-5)
+ * @returns {string} - Bracket description
+ */
+function getBracketDescription(bracket) {
+    const descriptions = {
+        1: 'Micro Cap (20K - 120K)',
+        2: 'Small Cap (200K - 1.2M)',
+        3: 'Medium Cap (2M - 12M)',
+        4: 'Large Cap (12M - 120M)',
+        5: 'Mega Cap (120M - 1.2B)'
+    };
+    return descriptions[bracket] || 'Unknown';
+}
+
+/**
+ * Calculate bracket from market cap (client-side calculation)
+ * @param {number} marketCap - Market cap value
+ * @returns {number} - Bracket number (1-5)
+ */
+function calculateBracketFromMarketCap(marketCap) {
+    if (marketCap >= 20000 && marketCap <= 120000) {
+        return 1;
+    } else if (marketCap >= 200000 && marketCap <= 1200000) {
+        return 2;
+    } else if (marketCap >= 2000000 && marketCap <= 12000000) {
+        return 3;
+    } else if (marketCap > 12000000 && marketCap <= 120000000) {
+        return 4;
+    } else if (marketCap > 120000000 && marketCap <= 1200000000) {
+        return 5;
+    } else {
+        // Default to bracket 1 for market caps outside defined ranges
+        return 1;
+    }
+}
+
+/**
+ * Load bracket order preview for a coin
+ * @param {string} address - Coin address
+ * @param {number} coinId - Coin ID for element targeting
+ * @param {number} totalAmount - Total investment amount
+ */
+async function loadBracketPreview(address, coinId, totalAmount) {
+    try {
+        const preview = await api.getBracketOrderPreview(address, totalAmount);
+        const previewElement = document.getElementById(`bracket-preview-${coinId}`);
+        
+        if (preview.success) {
+            let html = `
+                <div class="bracket-preview-content">
+                    <p><strong>Bracket ${preview.bracket}:</strong> ${preview.bracket_info.description}</p>
+                    <div class="preview-orders">
+            `;
+            
+            preview.preview_orders.forEach((order, index) => {
+                html += `
+                    <div class="preview-order">
+                        <strong>Order ${order.bracket_id}:</strong>
+                        Amount: $${order.amount.toFixed(2)} (${(order.trade_size_pct * 100).toFixed(1)}%) |
+                        Entry: ${order.entry_price.toLocaleString()} |
+                        TP: ${order.take_profit.toLocaleString()} (${(order.take_profit_pct * 100).toFixed(0)}%) |
+                        SL: ${order.stop_loss.toLocaleString()}
+                    </div>
+                `;
+            });
+            
+            html += `
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="createAutoOrder('${address}', ${totalAmount})">
+                        Create These Orders
+                    </button>
+                </div>
+            `;
+            
+            previewElement.innerHTML = html;
+        } else {
+            previewElement.innerHTML = '<p>Unable to load bracket preview</p>';
+        }
+    } catch (error) {
+        console.error('Error loading bracket preview:', error);
+        const previewElement = document.getElementById(`bracket-preview-${coinId}`);
+        previewElement.innerHTML = '<p>Error loading bracket preview</p>';
+    }
+}
+
+/**
+ * Create auto multi-order for a coin
+ * @param {string} address - Coin address
+ * @param {number} totalAmount - Total investment amount
+ */
+async function createAutoOrder(address, totalAmount) {
+    try {
+        const result = await api.createAutoMultiOrder(address, 1, 'BUY', totalAmount);
+        
+        if (result.success) {
+            alert(`Successfully created ${result.total_orders_created} orders for $${totalAmount}`);
+            // Refresh orders and coins
+            loadOrders();
+            loadCoins();
+        } else {
+            alert('Failed to create auto orders');
+        }
+    } catch (error) {
+        console.error('Error creating auto order:', error);
+        alert(`Error creating auto orders: ${error.message}`);
+    }
 }

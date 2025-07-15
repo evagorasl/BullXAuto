@@ -1,6 +1,10 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from models import Base, Order, Profile, Coin
+from bracket_config import (
+    calculate_bracket, get_bracket_info, calculate_order_parameters,
+    BRACKET_CONFIG, BRACKET_RANGES, TRADE_SIZES, TAKE_PROFIT_PERCENTAGES
+)
 from typing import List, Optional, Dict, Any
 import os
 from datetime import datetime
@@ -270,28 +274,12 @@ class DatabaseManager:
             db.close()
 
     def calculate_bracket(self, market_cap: float) -> int:
-        """Calculate bracket based on market cap"""
-        if market_cap < 100000:  # < 100K
-            return 1
-        elif market_cap < 500000:  # 100K - 500K
-            return 2
-        elif market_cap < 1000000:  # 500K - 1M
-            return 3
-        elif market_cap < 5000000:  # 1M - 5M
-            return 4
-        else:  # > 5M
-            return 5
+        """Calculate bracket based on market cap using bracket_config"""
+        return calculate_bracket(market_cap)
     
     def get_bracket_info(self, bracket: int) -> dict:
-        """Get bracket information"""
-        bracket_ranges = {
-            1: {"min": 0, "max": 100000, "description": "Micro Cap (< 100K)"},
-            2: {"min": 100000, "max": 500000, "description": "Small Cap (100K - 500K)"},
-            3: {"min": 500000, "max": 1000000, "description": "Medium Cap (500K - 1M)"},
-            4: {"min": 1000000, "max": 5000000, "description": "Large Cap (1M - 5M)"},
-            5: {"min": 5000000, "max": float('inf'), "description": "Mega Cap (> 5M)"}
-        }
-        return bracket_ranges.get(bracket, bracket_ranges[1])
+        """Get bracket information using bracket_config"""
+        return get_bracket_info(bracket)
     
     def get_next_bracket_id(self, coin_id: int, profile_name: str) -> int:
         """Get the next available bracket_id (1-4) for a coin and profile"""
@@ -317,6 +305,58 @@ class DatabaseManager:
         finally:
             db.close()
     
+    def create_multi_order_with_bracket_config(self, address: str, strategy_number: int, 
+                                             order_type: str, profile_name: str, 
+                                             total_amount: float) -> dict:
+        """Create multiple orders using bracket configuration automatically"""
+        db = self.SessionLocal()
+        try:
+            # Get or create the coin
+            coin = db.query(Coin).filter(Coin.address == address).first()
+            if not coin:
+                coin = Coin(address=address)
+                db.add(coin)
+                db.flush()  # Get the coin ID without committing
+            
+            # Calculate bracket if market_cap is available
+            if coin.market_cap:
+                coin.bracket = calculate_bracket(coin.market_cap)
+                
+                # Generate orders using bracket configuration
+                order_params = calculate_order_parameters(
+                    bracket=coin.bracket,
+                    total_amount=total_amount,
+                    current_price=coin.current_price
+                )
+                
+                # Convert to the format expected by create_multi_order
+                sub_orders = []
+                for params in order_params:
+                    sub_orders.append({
+                        'bracket_id': params['bracket_id'],
+                        'entry_price': params['entry_price'],
+                        'take_profit': params['take_profit'],
+                        'stop_loss': params['stop_loss'],
+                        'amount': params['amount']
+                    })
+                
+                # Use the existing create_multi_order method
+                return self.create_multi_order(
+                    address=address,
+                    strategy_number=strategy_number,
+                    order_type=order_type,
+                    profile_name=profile_name,
+                    sub_orders=sub_orders
+                )
+            else:
+                raise ValueError("Cannot create orders: coin market cap is not available")
+                
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+
     def create_multi_order(self, address: str, strategy_number: int, order_type: str, 
                           profile_name: str, sub_orders: list) -> dict:
         """Create multiple orders for a coin (up to 4 orders with different bracket_ids)"""

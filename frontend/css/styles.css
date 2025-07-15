@@ -310,10 +310,10 @@ input[type="checkbox"]:checked + .toggle-label:after {
 /* Footer */
 footer {
     text-align: center;
-    margin-top: 40px;
     padding: 20px;
+    background-color: var(--card-bg);
+    margin-top: 40px;
     border-top: 1px solid var(--border-color);
-    color: #777;
 }
 
 footer a {
@@ -323,6 +323,90 @@ footer a {
 
 footer a:hover {
     text-decoration: underline;
+}
+
+/* Bracket Badges */
+.bracket-badge {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: bold;
+    color: white;
+    text-align: center;
+    min-width: 20px;
+}
+
+.bracket-1 {
+    background-color: #e74c3c; /* Red for Micro Cap */
+}
+
+.bracket-2 {
+    background-color: #f39c12; /* Orange for Small Cap */
+}
+
+.bracket-3 {
+    background-color: #f1c40f; /* Yellow for Medium Cap */
+    color: #333;
+}
+
+.bracket-4 {
+    background-color: #27ae60; /* Green for Large Cap */
+}
+
+.bracket-5 {
+    background-color: #3498db; /* Blue for Mega Cap */
+}
+
+/* Bracket Preview */
+.bracket-preview {
+    margin-top: 20px;
+    padding: 15px;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    border: 1px solid #dee2e6;
+}
+
+.bracket-preview h4 {
+    margin-top: 0;
+    margin-bottom: 15px;
+    color: var(--primary-color);
+}
+
+.bracket-preview-content {
+    font-size: 14px;
+}
+
+.preview-orders {
+    margin: 15px 0;
+}
+
+.preview-order {
+    padding: 8px 12px;
+    margin: 5px 0;
+    background-color: white;
+    border-radius: 4px;
+    border-left: 4px solid var(--primary-color);
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+}
+
+.loading {
+    color: #666;
+    font-style: italic;
+}
+
+/* Enhanced result content */
+.result-content {
+    line-height: 1.6;
+}
+
+.result-content p {
+    margin: 8px 0;
+}
+
+.result-content strong {
+    color: var(--primary-color);
 }
 
 /* Utility Classes */

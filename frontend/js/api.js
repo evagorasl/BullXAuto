@@ -34,7 +34,7 @@ class BullXAPI {
         };
 
         if (this.apiKey) {
-            headers['Authorization'] = `Bearer ${this.apiKey}`;
+            headers['X-API-Key'] = this.apiKey;
         }
 
         return headers;
@@ -160,6 +160,70 @@ class BullXAPI {
      */
     async closeDriver() {
         return this.request('POST', '/api/v1/close-driver');
+    }
+
+    /**
+     * Get bracket information
+     * @returns {Promise} - Promise that resolves to the bracket info
+     */
+    async getBrackets() {
+        return this.request('GET', '/api/v1/brackets');
+    }
+
+    /**
+     * Get bracket configuration
+     * @returns {Promise} - Promise that resolves to the bracket config
+     */
+    async getBracketConfig() {
+        return this.request('GET', '/api/v1/bracket-config');
+    }
+
+    /**
+     * Create multiple orders automatically using bracket configuration
+     * @param {string} address - Token address
+     * @param {number} strategyNumber - Strategy number
+     * @param {string} orderType - Order type (BUY/SELL)
+     * @param {number} totalAmount - Total investment amount
+     * @returns {Promise} - Promise that resolves to the auto multi-order result
+     */
+    async createAutoMultiOrder(address, strategyNumber, orderType, totalAmount) {
+        const params = new URLSearchParams({
+            address,
+            strategy_number: strategyNumber,
+            order_type: orderType,
+            total_amount: totalAmount
+        });
+        return this.request('POST', `/api/v1/auto-multi-order?${params}`);
+    }
+
+    /**
+     * Preview bracket orders for a coin
+     * @param {string} address - Token address
+     * @param {number} totalAmount - Total investment amount
+     * @returns {Promise} - Promise that resolves to the bracket order preview
+     */
+    async getBracketOrderPreview(address, totalAmount) {
+        const params = new URLSearchParams({
+            total_amount: totalAmount
+        });
+        return this.request('GET', `/api/v1/coins/${address}/bracket-orders?${params}`);
+    }
+
+    /**
+     * Get orders summary grouped by coin and bracket
+     * @returns {Promise} - Promise that resolves to the orders summary
+     */
+    async getOrdersSummary() {
+        return this.request('GET', '/api/v1/orders-summary');
+    }
+
+    /**
+     * Get next available bracket ID for a coin
+     * @param {string} address - Token address
+     * @returns {Promise} - Promise that resolves to the next bracket ID
+     */
+    async getNextBracketId(address) {
+        return this.request('GET', `/api/v1/coins/${address}/next-bracket-id`);
     }
 }
 

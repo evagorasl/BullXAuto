@@ -12,7 +12,8 @@ from models import (
 from database import db_manager
 from chrome_driver import bullx_automator, chrome_driver_manager
 from auth import get_current_profile
-from bracket_config import get_bracket_info, calculate_order_parameters, BRACKET_CONFIG
+from bracket_config import get_bracket_info as get_bracket_config_info, calculate_order_parameters, BRACKET_CONFIG
+from bracket_order_placement import bracket_order_manager
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -373,7 +374,7 @@ async def get_orders_summary(current_profile: Profile = Depends(get_current_prof
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/brackets", response_model=List[BracketInfo])
-async def get_bracket_info(current_profile: Profile = Depends(get_current_profile)):
+async def get_brackets_info(current_profile: Profile = Depends(get_current_profile)):
     """Get information about market cap brackets"""
     try:
         brackets = []
@@ -496,11 +497,11 @@ async def get_bracket_order_preview(
         )
         
         # Get bracket info
-        bracket_info = get_bracket_info(bracket)
+        bracket_info = get_bracket_config_info(bracket)
         
         return {
             "success": True,
-            "coin": CoinResponse.from_orm(coin),
+            "coin": CoinResponse.model_validate(coin),
             "bracket": bracket,
             "bracket_info": bracket_info,
             "total_amount": total_amount,
@@ -531,6 +532,171 @@ async def get_bracket_config(current_profile: Profile = Depends(get_current_prof
         
     except Exception as e:
         logger.error(f"Error getting bracket config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# New bracket order placement endpoints
+@router.post("/bracket-strategy")
+async def execute_bracket_strategy(
+    address: str,
+    total_amount: float,
+    strategy_number: int = 1,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Execute complete bracket strategy for a coin - places all 4 bracket orders"""
+    try:
+        logger.info(f"Bracket strategy execution request for address: {address} using profile: {current_profile.name}")
+        
+        # Validate total amount
+        if total_amount <= 0:
+            raise HTTPException(status_code=400, detail="Total amount must be greater than 0")
+        
+        # Execute bracket strategy
+        result = bracket_order_manager.execute_bracket_strategy(
+            profile_name=current_profile.name,
+            address=address,
+            total_amount=total_amount,
+            strategy_number=strategy_number
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Bracket strategy executed successfully for {address}",
+                "bracket": result["bracket"],
+                "current_market_cap": result["current_market_cap"],
+                "placed_orders": result["placed_orders"],
+                "failed_orders": result["failed_orders"],
+                "total_placed": result["total_placed"],
+                "total_failed": result["total_failed"],
+                "total_amount": total_amount,
+                "profile": current_profile.name
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Bracket strategy execution failed: {result['error']}")
+            
+    except Exception as e:
+        logger.error(f"Bracket strategy execution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/bracket-order-replace/{address}/{bracket_id}")
+async def replace_bracket_order(
+    address: str,
+    bracket_id: int,
+    new_amount: float,
+    strategy_number: int = 1,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Replace a specific bracket order with a new one"""
+    try:
+        logger.info(f"Replace bracket order request for {address}, bracket_id: {bracket_id}")
+        
+        # Validate bracket_id
+        if not 1 <= bracket_id <= 4:
+            raise HTTPException(status_code=400, detail="Bracket ID must be between 1 and 4")
+        
+        # Validate amount
+        if new_amount <= 0:
+            raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+        
+        # Replace bracket order
+        result = bracket_order_manager.replace_order(
+            profile_name=current_profile.name,
+            address=address,
+            bracket_id=bracket_id,
+            new_amount=new_amount,
+            strategy_number=strategy_number
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Bracket order {bracket_id} replaced successfully",
+                "order": result["order"],
+                "profile": current_profile.name
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Bracket order replacement failed: {result['error']}")
+            
+    except Exception as e:
+        logger.error(f"Bracket order replacement error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/bracket-preview/{address}")
+async def get_bracket_strategy_preview(
+    address: str,
+    total_amount: float,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Preview bracket orders that would be placed without actually placing them"""
+    try:
+        logger.info(f"Bracket preview request for address: {address}")
+        
+        # Validate total amount
+        if total_amount <= 0:
+            raise HTTPException(status_code=400, detail="Total amount must be greater than 0")
+        
+        # Get bracket preview
+        preview = bracket_order_manager.get_bracket_preview(
+            address=address,
+            total_amount=total_amount,
+            profile_name=current_profile.name
+        )
+        
+        if preview["success"]:
+            return {
+                "success": True,
+                "message": f"Bracket preview generated for {address}",
+                "bracket": preview["bracket"],
+                "bracket_info": preview["bracket_info"],
+                "current_market_cap": preview["current_market_cap"],
+                "total_amount": preview["total_amount"],
+                "orders": preview["orders"],
+                "profile": current_profile.name
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Bracket preview failed: {preview['error']}")
+            
+    except Exception as e:
+        logger.error(f"Bracket preview error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/market-cap/{address}")
+async def get_current_market_cap(
+    address: str,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Get current market cap for a token"""
+    try:
+        logger.info(f"Market cap request for address: {address}")
+        
+        # Search for the address first to ensure we have current data
+        search_success = bullx_automator.search_address(current_profile.name, address)
+        if not search_success:
+            raise HTTPException(status_code=500, detail="Failed to search for token")
+        
+        # Get current market cap
+        market_cap = bullx_automator.get_market_cap(current_profile.name)
+        if market_cap <= 0:
+            raise HTTPException(status_code=500, detail="Failed to get market cap")
+        
+        # Calculate bracket
+        from bracket_config import calculate_bracket
+        bracket = calculate_bracket(market_cap)
+        bracket_info = get_bracket_config_info(bracket)
+        
+        return {
+            "success": True,
+            "address": address,
+            "market_cap": market_cap,
+            "bracket": bracket,
+            "bracket_info": bracket_info,
+            "profile": current_profile.name
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Market cap retrieval error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def calculate_strategy_prices(strategy_number: int, market_cap: float, order_type: str) -> dict:

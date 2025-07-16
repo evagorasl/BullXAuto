@@ -105,25 +105,17 @@ def calculate_order_parameters(bracket: int, total_amount: float, current_price:
         # Calculate trade size (amount)
         trade_amount = total_amount * TRADE_SIZES[i]
         
-        # Entry price (market cap converted to price if current_price provided)
+        # Entry price (use market cap values directly)
         entry_market_cap = config["entries"][i]
-        if current_price:
-            # Calculate entry price based on market cap ratio
-            # This is a simplified calculation - you may need to adjust based on your token economics
-            entry_price = current_price * (entry_market_cap / 1000000)  # Placeholder calculation
-        else:
-            entry_price = entry_market_cap  # Use market cap as price for now
+        entry_price = entry_market_cap  # Use market cap as entry target
         
-        # Take profit calculation
+        # Take profit calculation (use market cap values directly)
         take_profit_multiplier = TAKE_PROFIT_PERCENTAGES[i]
-        take_profit_price = entry_price * take_profit_multiplier
+        take_profit_price = entry_price + entry_price * take_profit_multiplier
         
-        # Stop loss calculation (based on stop_loss_market_cap)
+        # Stop loss calculation (use market cap value directly)
         stop_loss_market_cap = config["stop_loss_market_cap"]
-        if current_price:
-            stop_loss_price = current_price * (stop_loss_market_cap / 1000000)  # Placeholder calculation
-        else:
-            stop_loss_price = stop_loss_market_cap  # Use market cap as price for now
+        stop_loss_price = stop_loss_market_cap  # Use market cap as stop loss target
         
         orders.append({
             "bracket_id": bracket_id,

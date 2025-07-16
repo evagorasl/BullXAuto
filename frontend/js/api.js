@@ -34,7 +34,7 @@ class BullXAPI {
         };
 
         if (this.apiKey) {
-            headers['X-API-Key'] = this.apiKey;
+            headers['Authorization'] = `Bearer ${this.apiKey}`;
         }
 
         return headers;
@@ -224,6 +224,60 @@ class BullXAPI {
      */
     async getNextBracketId(address) {
         return this.request('GET', `/api/v1/coins/${address}/next-bracket-id`);
+    }
+
+    /**
+     * Execute bracket strategy for a coin (places all 4 bracket orders)
+     * @param {string} address - Token address
+     * @param {number} totalAmount - Total investment amount
+     * @param {number} strategyNumber - Strategy number (optional, default: 1)
+     * @returns {Promise} - Promise that resolves to the bracket strategy result
+     */
+    async executeBracketStrategy(address, totalAmount, strategyNumber = 1) {
+        const params = new URLSearchParams({
+            address,
+            total_amount: totalAmount,
+            strategy_number: strategyNumber
+        });
+        return this.request('POST', `/api/v1/bracket-strategy?${params}`);
+    }
+
+    /**
+     * Replace a specific bracket order
+     * @param {string} address - Token address
+     * @param {number} bracketId - Bracket ID to replace (1-4)
+     * @param {number} newAmount - New order amount
+     * @param {number} strategyNumber - Strategy number (optional, default: 1)
+     * @returns {Promise} - Promise that resolves to the replacement result
+     */
+    async replaceBracketOrder(address, bracketId, newAmount, strategyNumber = 1) {
+        const params = new URLSearchParams({
+            new_amount: newAmount,
+            strategy_number: strategyNumber
+        });
+        return this.request('POST', `/api/v1/bracket-order-replace/${address}/${bracketId}?${params}`);
+    }
+
+    /**
+     * Preview bracket orders without placing them
+     * @param {string} address - Token address
+     * @param {number} totalAmount - Total investment amount
+     * @returns {Promise} - Promise that resolves to the bracket preview
+     */
+    async getBracketPreview(address, totalAmount) {
+        const params = new URLSearchParams({
+            total_amount: totalAmount
+        });
+        return this.request('GET', `/api/v1/bracket-preview/${address}?${params}`);
+    }
+
+    /**
+     * Get current market cap for a token
+     * @param {string} address - Token address
+     * @returns {Promise} - Promise that resolves to the market cap data
+     */
+    async getMarketCap(address) {
+        return this.request('GET', `/api/v1/market-cap/${address}`);
     }
 }
 

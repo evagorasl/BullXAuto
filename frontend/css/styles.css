@@ -409,6 +409,231 @@ footer a:hover {
     color: var(--primary-color);
 }
 
+/* Bracket Strategy Styles */
+.description {
+    color: #666;
+    font-size: 0.9rem;
+    margin-bottom: 20px;
+    font-style: italic;
+}
+
+.info-box {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    padding: 15px;
+    margin: 15px 0;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.info-row:last-child {
+    margin-bottom: 0;
+}
+
+.info-row .label {
+    font-weight: 500;
+    color: #555;
+}
+
+.info-row .value {
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+.button-group {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+.btn-small {
+    padding: 6px 12px;
+    font-size: 0.9rem;
+    margin-left: 10px;
+}
+
+.form-group {
+    position: relative;
+}
+
+.form-group input + .btn-small {
+    position: absolute;
+    right: 5px;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+}
+
+.form-group input.has-button {
+    padding-right: 120px;
+}
+
+/* Market Cap Formatting */
+.market-cap {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+}
+
+.market-cap.micro { color: #e74c3c; }
+.market-cap.small { color: #f39c12; }
+.market-cap.medium { color: #f1c40f; }
+.market-cap.large { color: #27ae60; }
+.market-cap.mega { color: #3498db; }
+
+/* Order Type Badges */
+.order-type-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.order-type-market {
+    background-color: #e74c3c;
+    color: white;
+}
+
+.order-type-limit {
+    background-color: #3498db;
+    color: white;
+}
+
+/* Strategy Name Styling */
+.strategy-name {
+    font-family: 'Courier New', monospace;
+    background-color: #f8f9fa;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    border: 1px solid #dee2e6;
+}
+
+/* Enhanced Table Styling for Bracket Preview */
+#bracket-preview-table th {
+    background-color: var(--primary-color);
+    color: white;
+    font-size: 0.9rem;
+}
+
+#bracket-preview-table td {
+    font-size: 0.9rem;
+}
+
+#bracket-preview-table .amount-cell {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    color: var(--success-color);
+}
+
+#bracket-preview-table .percentage-cell {
+    font-weight: bold;
+    color: #666;
+}
+
+/* Loading States */
+.loading-spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid #f3f3f3;
+    border-top: 2px solid var(--primary-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-right: 8px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+    background-color: inherit;
+}
+
+/* Success/Error States */
+.result-success {
+    border-left: 4px solid var(--success-color);
+    background-color: #f0fff4;
+}
+
+.result-error {
+    border-left: 4px solid var(--danger-color);
+    background-color: #fff5f5;
+}
+
+.result-warning {
+    border-left: 4px solid var(--warning-color);
+    background-color: #fffbf0;
+}
+
+/* Bracket Result Details */
+.bracket-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin: 15px 0;
+}
+
+.bracket-stat {
+    background-color: white;
+    padding: 15px;
+    border-radius: 6px;
+    border: 1px solid #dee2e6;
+    text-align: center;
+}
+
+.bracket-stat .stat-value {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: var(--primary-color);
+    display: block;
+}
+
+.bracket-stat .stat-label {
+    font-size: 0.9rem;
+    color: #666;
+    margin-top: 5px;
+}
+
+/* Order Status Indicators */
+.order-status {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.order-status.placed {
+    background-color: var(--success-color);
+    color: white;
+}
+
+.order-status.failed {
+    background-color: var(--danger-color);
+    color: white;
+}
+
+.order-status.pending {
+    background-color: var(--warning-color);
+    color: white;
+}
+
 /* Utility Classes */
 .hidden {
     display: none;

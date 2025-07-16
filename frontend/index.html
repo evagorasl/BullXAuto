@@ -94,6 +94,85 @@
                     </div>
                 </div>
 
+                <!-- Bracket Strategy Section -->
+                <div class="card">
+                    <h2><i class="fas fa-layer-group"></i> Bracket Strategy</h2>
+                    <p class="description">Place multiple orders based on market cap brackets with automatic order type selection.</p>
+                    
+                    <div class="form-group">
+                        <label for="bracket-address">Token Address</label>
+                        <input type="text" id="bracket-address" placeholder="Enter token address">
+                        <button id="get-market-cap-btn" class="btn btn-secondary btn-small">Get Market Cap</button>
+                    </div>
+                    
+                    <div id="market-cap-info" class="info-box hidden">
+                        <div class="info-row">
+                            <span class="label">Current Market Cap:</span>
+                            <span id="current-market-cap" class="value"></span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label">Bracket:</span>
+                            <span id="current-bracket" class="value"></span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label">Description:</span>
+                            <span id="bracket-description" class="value"></span>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="bracket-amount">Total Investment Amount ($)</label>
+                        <input type="number" id="bracket-amount" placeholder="Enter total amount to invest" min="0" step="0.01">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="bracket-strategy-number">Strategy Number</label>
+                        <select id="bracket-strategy-number">
+                            <option value="1">Strategy 1</option>
+                            <option value="2">Strategy 2</option>
+                            <option value="3">Strategy 3</option>
+                        </select>
+                    </div>
+
+                    <div class="button-group">
+                        <button id="preview-bracket-btn" class="btn btn-secondary">
+                            <i class="fas fa-eye"></i> Preview Orders
+                        </button>
+                        <button id="execute-bracket-btn" class="btn btn-primary">
+                            <i class="fas fa-rocket"></i> Execute Bracket Strategy
+                        </button>
+                    </div>
+
+                    <div id="bracket-preview" class="result-box hidden">
+                        <h3>Bracket Order Preview</h3>
+                        <div id="bracket-preview-details"></div>
+                        <div class="table-container">
+                            <table id="bracket-preview-table">
+                                <thead>
+                                    <tr>
+                                        <th>Order</th>
+                                        <th>Type</th>
+                                        <th>Strategy</th>
+                                        <th>Entry MC</th>
+                                        <th>Take Profit MC</th>
+                                        <th>Stop Loss MC</th>
+                                        <th>Amount</th>
+                                        <th>Percentage</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="bracket-preview-body">
+                                    <!-- Preview orders will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div id="bracket-result" class="result-box hidden">
+                        <h3>Bracket Strategy Result</h3>
+                        <div id="bracket-result-details"></div>
+                    </div>
+                </div>
+
                 <!-- Active Orders Section -->
                 <div class="card full-width">
                     <h2>Active Orders</h2>

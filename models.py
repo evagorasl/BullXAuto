@@ -88,6 +88,10 @@ class ProfileResponse(BaseModel):
     class Config:
         from_attributes = True
 
+    @classmethod
+    def from_orm(cls, obj):
+        return cls.model_validate(obj)
+
 class CoinResponse(BaseModel):
     id: int
     name: Optional[str]
@@ -100,6 +104,10 @@ class CoinResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+    @classmethod
+    def from_orm(cls, obj):
+        return cls.model_validate(obj)
 
 class OrderResponse(BaseModel):
     id: int
@@ -119,6 +127,10 @@ class OrderResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+    @classmethod
+    def from_orm(cls, obj):
+        return cls.model_validate(obj)
 
 class OrderDetailResponse(BaseModel):
     id: int

@@ -215,13 +215,13 @@ class BracketOrderPlacer:
         try:
             # Look for buy button - adjust selector based on actual BullX UI
             buy_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Buy') or contains(@class, 'buy')]"))
+                EC.element_to_be_clickable((By.XPATH, "//div[contains(text(), 'Buy') or contains(@class, 'buy')]"))
             )
             buy_button.click()
             
             # Wait for buy interface to load
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='0.0' or contains(@placeholder, 'amount')]"))
+                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='0' or contains(@placeholder, 'amount')]"))
             )
             
             return True
@@ -235,7 +235,7 @@ class BracketOrderPlacer:
         try:
             # Find amount input field
             amount_input = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[@placeholder='0.0' or contains(@placeholder, 'amount')]"))
+                EC.element_to_be_clickable((By.XPATH, "//input[@placeholder='0' or contains(@placeholder, 'amount')]"))
             )
             
             # Clear and enter amount
@@ -260,7 +260,7 @@ class BracketOrderPlacer:
         try:
             # Look for market order button or immediate buy button
             market_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Market') or contains(text(), 'Buy Now')]"))
+                EC.element_to_be_clickable((By.XPATH, "//div[contains(text(), 'Market')]"))
             )
             market_button.click()
             
@@ -275,14 +275,14 @@ class BracketOrderPlacer:
         try:
             # Look for limit order option
             limit_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Limit') or contains(@class, 'limit')]"))
+                EC.element_to_be_clickable((By.XPATH, "//div[contains(text(), 'Limit')]"))
             )
             limit_button.click()
             
             # Enter limit price (this would need to be converted from market cap to actual price)
             # For now, we'll use the market cap value directly as a placeholder
             limit_price_input = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[contains(@placeholder, 'price') or contains(@placeholder, 'limit')]"))
+                EC.element_to_be_clickable((By.XPATH, "//input[@placeholder='0' and @value>0]"))
             )
             
             limit_price_input.clear()
@@ -306,21 +306,30 @@ class BracketOrderPlacer:
         try:
             # Open auto-sell frame
             auto_sell_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Auto Sell') or contains(@class, 'auto-sell')]"))
+                EC.element_to_be_clickable((By.XPATH, "//button/span[contains(text(), 'Auto Sell') or contains(@class, 'auto-sell')]"))
             )
             auto_sell_button.click()
             
             # Wait for auto-sell frame to open
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'auto-sell-frame') or contains(@class, 'strategy-selector')]"))
+                EC.presence_of_element_located((By.XPATH, "//button/span[text()='Select']"))
             )
             
             # Select strategy by name (e.g., "Bracket1_1")
-            strategy_selector = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, f"//option[text()='{strategy_name}'] | //button[text()='{strategy_name}']"))
-            )
-            strategy_selector.click()
+            strategies_names = driver.find_elements(By.XPATH, "//div/span[@class='text-grey-50 text-sm leading-[14px] font-medium text-left']/div")
+            for strategy in strategies_names:
+                strategy_name_found = strategy.find_element(By.XPATH, "./div/div/span").text
+                if strategy_name_found == f"{strategy_name}":
+                    logger.info(f"Found {strategy_name}")
+                    strategy_select = strategy.find_element(By.XPATH, "./div/div[2]/button[2]/span[contains(text(), 'Select')]")
+                    strategy_select.click()
+                    #strategy_selector = WebDriverWait(driver, 10).until(
+                    #    EC.element_to_be_clickable((By.XPATH, f"//option[text()='{strategy_name}'] | //button[text()='{strategy_name}']"))
+                    #)
+                    #strategy_selector.click()
+                    break
             
+            """
             # Configure take profit
             tp_input = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//input[contains(@placeholder, 'take profit') or contains(@name, 'tp')]"))
@@ -340,7 +349,7 @@ class BracketOrderPlacer:
                 EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Confirm') or contains(text(), 'Apply')]"))
             )
             confirm_auto_sell.click()
-            
+            """
             logger.info(f"Configured auto-sell strategy: {strategy_name}")
             logger.info(f"TP: ${take_profit_market_cap:,.0f}, SL: ${stop_loss_market_cap:,.0f}")
             
@@ -355,7 +364,7 @@ class BracketOrderPlacer:
         try:
             # Look for final confirm/place order button
             confirm_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Place Order') or contains(text(), 'Confirm') or contains(text(), 'Buy')]"))
+                EC.element_to_be_clickable((By.XPATH, "//button/span[contains(text(), 'Buy')]"))
             )
             confirm_button.click()
             

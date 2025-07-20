@@ -150,10 +150,6 @@ class BracketOrderPlacer:
             if not self._navigate_to_buy_interface(driver):
                 return {"success": False, "error": "Failed to navigate to buy interface"}
             
-            # Enter order amount
-            if not self._enter_order_amount(driver, amount):
-                return {"success": False, "error": "Failed to enter order amount"}
-            
             # Handle market vs limit order placement
             if is_market_order:
                 # Place market order immediately
@@ -163,7 +159,11 @@ class BracketOrderPlacer:
                 # Set up limit order at entry market cap
                 if not self._setup_limit_order(driver, entry_market_cap):
                     return {"success": False, "error": "Failed to setup limit order"}
-            
+
+            # Enter order amount
+            if not self._enter_order_amount(driver, amount):
+                return {"success": False, "error": "Failed to enter order amount"}
+
             # Open auto-sell frame and configure strategy
             strategy_name = f"Bracket{bracket}_{bracket_id}"
             if not self._configure_auto_sell_strategy(
@@ -215,7 +215,7 @@ class BracketOrderPlacer:
         try:
             # Look for buy button - adjust selector based on actual BullX UI
             buy_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[contains(text(), 'Buy') or contains(@class, 'buy')]"))
+                EC.element_to_be_clickable((By.XPATH, "//button/span[contains(text(), 'Buy') or contains(@class, 'buy') or contains(text(), 'Add Funds')]"))
             )
             buy_button.click()
             
@@ -278,14 +278,14 @@ class BracketOrderPlacer:
                 EC.element_to_be_clickable((By.XPATH, "//div[contains(text(), 'Limit')]"))
             )
             limit_button.click()
-            
+            time.sleep(1)
             # Enter limit price (this would need to be converted from market cap to actual price)
             # For now, we'll use the market cap value directly as a placeholder
             limit_price_input = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//input[@placeholder='0' and @value>0]"))
             )
-            
-            limit_price_input.clear()
+            limit_price_input.send_keys(Keys.CONTROL + "A")
+            limit_price_input.send_keys(Keys.DELETE)
             limit_price_input.send_keys(str(entry_market_cap))
             
             return True
@@ -312,17 +312,20 @@ class BracketOrderPlacer:
             
             # Wait for auto-sell frame to open
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//button/span[text()='Select']"))
+                EC.presence_of_element_located((By.XPATH, "//button/span[contains(text(), 'Select')]"))
             )
+            time.sleep(2)
             
             # Select strategy by name (e.g., "Bracket1_1")
-            strategies_names = driver.find_elements(By.XPATH, "//div/span[@class='text-grey-50 text-sm leading-[14px] font-medium text-left']/div")
+            strategies_names = driver.find_elements(By.XPATH, "//div[@class='flex flex-col gap-y-3 mt-4 pb-4']/div")
             for strategy in strategies_names:
                 strategy_name_found = strategy.find_element(By.XPATH, "./div/div/span").text
+                logger.info(f"Found {strategy_name_found} to match {strategy_name}")
                 if strategy_name_found == f"{strategy_name}":
                     logger.info(f"Found {strategy_name}")
                     strategy_select = strategy.find_element(By.XPATH, "./div/div[2]/button[2]/span[contains(text(), 'Select')]")
                     strategy_select.click()
+                    time.sleep(2)
                     #strategy_selector = WebDriverWait(driver, 10).until(
                     #    EC.element_to_be_clickable((By.XPATH, f"//option[text()='{strategy_name}'] | //button[text()='{strategy_name}']"))
                     #)

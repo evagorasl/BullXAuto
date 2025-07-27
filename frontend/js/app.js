@@ -735,7 +735,7 @@ async function handlePreviewBracket() {
                         <span class="stat-label">Current Market Cap</span>
                     </div>
                     <div class="bracket-stat">
-                        <span class="stat-value">$${formatNumber(result.total_amount)}</span>
+                        <span class="stat-value">${formatNumber(result.total_amount)} SOL</span>
                         <span class="stat-label">Total Investment</span>
                     </div>
                     <div class="bracket-stat">
@@ -759,7 +759,7 @@ async function handlePreviewBracket() {
                     <td class="market-cap">$${formatNumber(order.entry_price)}</td>
                     <td class="market-cap">$${formatNumber(order.take_profit)}</td>
                     <td class="market-cap">$${formatNumber(order.stop_loss)}</td>
-                    <td class="amount-cell">$${order.amount.toFixed(2)}</td>
+                    <td class="amount-cell">${order.amount.toFixed(6)} SOL</td>
                     <td class="percentage-cell">${(order.trade_size_pct * 100).toFixed(1)}%</td>
                 `;
                 previewBody.appendChild(row);
@@ -849,7 +849,7 @@ async function handleExecuteBracket() {
                 resultDetails.innerHTML += `
                     <div class="order-result">
                         <strong>${order.strategy_name}</strong> (${order.order_type}): 
-                        $${order.amount.toFixed(2)} - 
+                        ${order.amount.toFixed(6)} SOL - 
                         Entry: $${formatNumber(order.entry_market_cap)}, 
                         TP: $${formatNumber(order.take_profit_market_cap)}, 
                         SL: $${formatNumber(order.stop_loss_market_cap)}
@@ -891,9 +891,9 @@ async function handleExecuteBracket() {
         console.error('Error executing bracket strategy:', error);
         showBracketMessage(`Error: ${error.message}`, 'error');
     } finally {
-        // Reset button state
+        // Reset button state - stop animation and restore original text
         const button = document.getElementById('execute-bracket-btn');
-        button.innerHTML = originalText;
+        button.innerHTML = '<i class="fas fa-rocket"></i> Execute Bracket Strategy';
         button.disabled = false;
     }
 }

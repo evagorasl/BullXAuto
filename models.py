@@ -42,6 +42,7 @@ class Order(Base):
     amount = Column(Float, nullable=True)  # Amount of the order (optional)
     status = Column(String, default="ACTIVE")  # ACTIVE, COMPLETED, STOPPED
     profile_name = Column(String, nullable=False)
+    is_market_order = Column(Boolean, nullable=True)  # Whether this was a market order or limit order
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     completed_at = Column(DateTime, nullable=True)  # When the order was completed/stopped
@@ -122,6 +123,7 @@ class OrderResponse(BaseModel):
     amount: Optional[float]
     status: str
     profile_name: str
+    is_market_order: Optional[bool]
     created_at: datetime
     completed_at: Optional[datetime]
     

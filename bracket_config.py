@@ -14,7 +14,7 @@ BRACKET_RANGES = {
 
 # Trade sizes for each bracket_id (order within bracket)
 # These are percentages of the total investment amount
-TRADE_SIZES = [0.3333, 0.3333, 0.1667, 0.1667]  # bracket_id 1, 2, 3, 4
+TRADE_SIZES = [1/3, 1/3, 1/6, 1/6]  # bracket_id 1, 2, 3, 4
 
 # Take profit percentages for each bracket_id
 TAKE_PROFIT_PERCENTAGES = [1.12, 0.89, 0.81, 0.56]  # 112%, 89%, 81%, 56%

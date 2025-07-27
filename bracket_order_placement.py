@@ -64,6 +64,9 @@ class BracketOrderPlacer:
             order_params = calculate_order_parameters(bracket, total_amount)
             
             logger.info(f"Placing bracket {bracket} orders for {address} with market cap ${current_market_cap:,.0f}")
+            logger.info(f"Total amount: {total_amount}, Order parameters:")
+            for i, param in enumerate(order_params):
+                logger.info(f"  Bracket ID {param['bracket_id']}: Amount={param['amount']:.6f} (Trade size: {param['trade_size_pct']:.4f})")
             
             # Place each order
             placed_orders = []
@@ -202,7 +205,7 @@ class BracketOrderPlacer:
                     "stop_loss_market_cap": stop_loss_market_cap,
                     "amount": amount,
                     "strategy_name": strategy_name,
-                    "db_order_id": db_result.get("order_id") if db_result else None
+                    "db_order_id": db_result.id if db_result else None
                 }
             }
             
@@ -239,16 +242,58 @@ class BracketOrderPlacer:
                 EC.element_to_be_clickable((By.XPATH, "/html/body/div[1]/div[1]/div[2]/main/div/div[2]/aside/div/div[3]/div/div/div/div[1]/div[3]/div[2]/div/div/div/div[2]/div/div[1]/div[1]/div/div/div[2]/div/div/input"))
             )
             
+            logger.info(f"Attempting to enter amount: {amount}")
+            
+            # Get initial value before clearing
+            initial_value = amount_input.get_attribute("value")
+            logger.info(f"Initial input value: '{initial_value}'")
+            
             # Clear and enter amount
-            amount_input.clear()
-            amount_input.send_keys(str(amount))
+            amount_input.send_keys(Keys.CONTROL + "A")
+            amount_input.send_keys(Keys.DELETE)
+            # Check if cleared successfully
+            cleared_value = amount_input.get_attribute("value")
+            logger.info(f"Value after clear: '{cleared_value}'")
+            
+            # Enter the amount
+            amount_str = str(amount)
+            logger.info(f"Sending keys: '{amount_str}'")
+            amount_input.send_keys(amount_str)
             
             # Verify amount was entered
             time.sleep(0.5)  # Brief pause for UI update
             entered_value = amount_input.get_attribute("value")
+            logger.info(f"Final entered value: '{entered_value}'")
             
-            if not entered_value or float(entered_value) != amount:
-                logger.warning(f"Amount verification failed. Expected: {amount}, Got: {entered_value}")
+            if not entered_value:
+                logger.warning(f"Amount verification failed. No value entered.")
+            else:
+                try:
+                    entered_float = float(entered_value)
+                    # Use more generous tolerance for floating point comparison (1% tolerance)
+                    tolerance = max(abs(amount * 0.01), 0.001)  # 1% tolerance with minimum of 0.001
+                    difference = abs(entered_float - amount)
+                    
+                    logger.info(f"Amount comparison - Expected: {amount}, Got: {entered_float}, Difference: {difference}, Tolerance: {tolerance}")
+                    
+                    if difference > tolerance:
+                        logger.warning(f"Amount verification failed. Expected: {amount}, Got: {entered_value}, Difference: {difference} > Tolerance: {tolerance}")
+                        
+                        # Try to correct the value if it seems like it was doubled or has precision issues
+                        if abs(entered_float - (amount * 2)) < tolerance:
+                            logger.info("Detected doubled value, attempting to correct...")
+                            amount_input.send_keys(Keys.CONTROL + "A")
+                            amount_input.send_keys(Keys.DELETE)
+                            time.sleep(0.2)
+                            amount_input.send_keys(str(amount))
+                            time.sleep(0.5)
+                            corrected_value = amount_input.get_attribute("value")
+                            logger.info(f"Corrected value: '{corrected_value}'")
+                    else:
+                        logger.info("Amount verification passed")
+                        
+                except ValueError:
+                    logger.warning(f"Amount verification failed. Invalid value: '{entered_value}'")
             
             return True
             

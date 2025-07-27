@@ -147,8 +147,8 @@ class BracketOrderPlacer:
             logger.info(f"Current MC: ${current_market_cap:,.0f}, Entry MC: ${entry_market_cap:,.0f}")
             
             # Navigate to buy interface
-            if not self._navigate_to_buy_interface(driver):
-                return {"success": False, "error": "Failed to navigate to buy interface"}
+            #if not self._navigate_to_buy_interface(driver):
+            #    return {"success": False, "error": "Failed to navigate to buy interface"}
             
             # Handle market vs limit order placement
             if is_market_order:
@@ -215,8 +215,9 @@ class BracketOrderPlacer:
         try:
             # Look for buy button - adjust selector based on actual BullX UI
             buy_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button/span[contains(text(), 'Buy') or contains(@class, 'buy') or contains(text(), 'Add Funds')]"))
+                EC.element_to_be_clickable((By.XPATH, "//button/span[contains(text(), 'Buy')]"))
             )
+            logger.info("pressed buy button")
             buy_button.click()
             
             # Wait for buy interface to load
@@ -235,7 +236,7 @@ class BracketOrderPlacer:
         try:
             # Find amount input field
             amount_input = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[@placeholder='0' or contains(@placeholder, 'amount')]"))
+                EC.element_to_be_clickable((By.XPATH, "/html/body/div[1]/div[1]/div[2]/main/div/div[2]/aside/div/div[3]/div/div/div/div[1]/div[3]/div[2]/div/div/div/div[2]/div/div[1]/div[1]/div/div/div[2]/div/div/input"))
             )
             
             # Clear and enter amount
@@ -282,7 +283,7 @@ class BracketOrderPlacer:
             # Enter limit price (this would need to be converted from market cap to actual price)
             # For now, we'll use the market cap value directly as a placeholder
             limit_price_input = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[@placeholder='0' and @value>0]"))
+                EC.element_to_be_clickable((By.XPATH, "/html/body/div[1]/div[1]/div[2]/main/div/div[2]/aside/div/div[3]/div/div/div/div[1]/div[3]/div[2]/div/div/div/div[2]/div/div[2]/div/div[1]/div/div[2]/div/div/input"))
             )
             limit_price_input.send_keys(Keys.CONTROL + "A")
             limit_price_input.send_keys(Keys.DELETE)

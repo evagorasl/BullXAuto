@@ -321,9 +321,7 @@ class BracketOrderPlacer:
             strategies_names = driver.find_elements(By.XPATH, "//div[@class='flex flex-col gap-y-3 mt-4 pb-4']/div")
             for strategy in strategies_names:
                 strategy_name_found = strategy.find_element(By.XPATH, "./div/div/span").text
-                logger.info(f"Found {strategy_name_found} to match {strategy_name}")
                 if strategy_name_found == f"{strategy_name}":
-                    logger.info(f"Found {strategy_name}")
                     strategy_select = strategy.find_element(By.XPATH, "./div/div[2]/button[2]/span[contains(text(), 'Select')]")
                     strategy_select.click()
                     time.sleep(2)

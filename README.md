@@ -64,8 +64,8 @@ BullXAuto/
 3. **Set up Chrome profiles:**
    - Create two Chrome profiles named "Saruman" and "Gandalf"
    - The profiles should be located at:
-     - `C:\Users\evago\AppData\Local\Google\Chrome\User Data\Profile Saruman`
-     - `C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Profile Gandalf`
+     - `%USERPROFILE%\AppData\Local\Google\Chrome\User Data\Profile Saruman`
+     - `%USERPROFILE%\AppData\Local\Google\Chrome\User Data\Profile Gandalf`
 
 ## Usage
 

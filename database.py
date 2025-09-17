@@ -41,12 +41,12 @@ def init_profiles():
             # Create default profiles
             profile1 = Profile(
                 name="Saruman",
-                chrome_profile_path=r"C:\Users\evago\AppData\Local\Google\Chrome\User Data\Profile Saruman",
+                chrome_profile_path=os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Saruman"),
                 api_key=api_key_1
             )
             profile2 = Profile(
                 name="Gandalf", 
-                chrome_profile_path=r"C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\User Data\\Profile Gandalf",
+                chrome_profile_path=os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Gandalf"),
                 api_key=api_key_2
             )
             

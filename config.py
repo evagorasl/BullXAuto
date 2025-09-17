@@ -13,8 +13,8 @@ class Config:
     
     # Chrome profiles configuration
     CHROME_PROFILES = {
-        "Saruman": r"C:\Users\evago\AppData\Local\Google\Chrome\User Data\Profile Saruman",
-        "Gandalf": r"C:\Users\evago\AppData\Local\Google\Chrome\User Data\Profile Gandalf"
+        "Saruman": os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Saruman"),
+        "Gandalf": os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Gandalf")
     }
     
     # BullX configuration

@@ -81,7 +81,7 @@ def get_bracket_info(bracket: int) -> dict:
         "entries": config["entries"]
     }
 
-def calculate_order_parameters(bracket: int, total_amount: float, current_price: float = None) -> list:
+def calculate_order_parameters(bracket: int, total_amount: float, current_price: float) -> list:
     """
     Calculate order parameters for all bracket_ids within a bracket
     

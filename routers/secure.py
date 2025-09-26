@@ -699,6 +699,47 @@ async def get_current_market_cap(
         logger.error(f"Market cap retrieval error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+async def check_orders_service(profile_name: str) -> dict:
+    """Shared service function for checking orders - used by both API and background tasks"""
+    try:
+        logger.info(f"Order check service for profile: {profile_name}")
+        
+        # Execute order check
+        result = bullx_automator.check_orders(profile_name)
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "message": result["message"],
+                "total_buttons": result["total_buttons"],
+                "order_info": result["order_info"],
+                "profile": profile_name
+            }
+        else:
+            return {"success": False, "error": result.get("error", "Unknown error")}
+            
+    except Exception as e:
+        logger.error(f"Order check service error: {e}")
+        return {"success": False, "error": str(e)}
+
+@router.post("/check-orders")
+async def check_orders(current_profile: Profile = Depends(get_current_profile)):
+    """Check all orders by navigating to automation page and extracting information"""
+    try:
+        # Use the shared service function with current_profile.name
+        result = await check_orders_service(current_profile.name)
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=500, detail=f"Order check failed: {result['error']}")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Order check API error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 def calculate_strategy_prices(strategy_number: int, market_cap: float, order_type: str) -> dict:
     """Calculate default prices based on strategy and market cap"""
     # This is a basic implementation - you can customize based on your strategies

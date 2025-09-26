@@ -14,22 +14,46 @@ class OrderMonitor:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.is_running = False
+        self.monitored_profiles = set()
     
-    async def start_monitoring(self):
-        """Start the background order monitoring"""
+    async def start_monitoring_for_profile(self, profile_name: str):
+        """Start background order monitoring for a specific profile"""
         if not self.is_running:
-            # Schedule order checking every 5 minutes
+            self.scheduler.start()
+            self.is_running = True
+            logger.info("Order monitoring scheduler started")
+        
+        # Add profile-specific job if not already monitoring this profile
+        job_id = f'order_checker_{profile_name}'
+        if profile_name not in self.monitored_profiles:
             self.scheduler.add_job(
                 self.check_orders,
                 trigger=IntervalTrigger(minutes=5),
-                id='order_checker',
-                name='Check Orders Status',
+                args=[profile_name],
+                id=job_id,
+                name=f'Check Orders Status for {profile_name}',
                 replace_existing=True
             )
-            
-            self.scheduler.start()
-            self.is_running = True
-            logger.info("Order monitoring started - checking every 5 minutes")
+            self.monitored_profiles.add(profile_name)
+            logger.info(f"Order monitoring started for profile {profile_name} - checking every 5 minutes")
+    
+    async def stop_monitoring_for_profile(self, profile_name: str):
+        """Stop background order monitoring for a specific profile"""
+        job_id = f'order_checker_{profile_name}'
+        try:
+            self.scheduler.remove_job(job_id)
+            self.monitored_profiles.discard(profile_name)
+            logger.info(f"Order monitoring stopped for profile {profile_name}")
+        except Exception as e:
+            logger.error(f"Error stopping monitoring for profile {profile_name}: {e}")
+    
+    async def start_monitoring(self):
+        """Start the background order monitoring (deprecated - use start_monitoring_for_profile)"""
+        logger.warning("start_monitoring() is deprecated. Use start_monitoring_for_profile(profile_name) instead.")
+        # For backward compatibility, we'll start monitoring for all profiles
+        profiles = self._get_all_profiles()
+        for profile_name in profiles:
+            await self.start_monitoring_for_profile(profile_name)
     
     async def stop_monitoring(self):
         """Stop the background order monitoring"""
@@ -38,17 +62,102 @@ class OrderMonitor:
             self.is_running = False
             logger.info("Order monitoring stopped")
     
-    async def check_orders(self):
-        """Check all active orders and re-enter if needed"""
+    async def check_orders(self, profile_name: str):
+        """Check active orders for a specific profile by navigating to automation page and extracting information"""
         try:
-            active_orders = db_manager.get_active_orders()
-            logger.info(f"Checking {len(active_orders)} active orders")
+            logger.info(f"Starting order check for profile: {profile_name}")
+            
+            # Import the API function to reuse the logic
+            from routers.secure import check_orders_service
+            
+            try:
+                logger.info(f"Checking orders for profile: {profile_name}")
+                
+                # Use the shared service function from the API
+                result = await check_orders_service(profile_name)
+                
+                if result["success"]:
+                    logger.info(f"Successfully processed {result['total_buttons']} buttons for {profile_name}")
+                    
+                    # Process the extracted order information
+                    await self.process_order_information(profile_name, result["order_info"])
+                    
+                else:
+                    logger.error(f"Order check failed for {profile_name}: {result.get('error', 'Unknown error')}")
+                    
+            except Exception as e:
+                logger.error(f"Error checking orders for profile {profile_name}: {e}")
+            
+            # Also check individual active orders from database for this profile
+            active_orders = db_manager.get_active_orders_by_profile(profile_name)
+            logger.info(f"Also checking {len(active_orders)} active orders from database for {profile_name}")
             
             for order in active_orders:
                 await self.check_single_order(order)
+            
+            # Close the driver when done
+            try:
+                from chrome_driver import chrome_driver_manager
+                chrome_driver_manager.close_driver(profile_name)
+                logger.info(f"Closed Chrome driver for profile: {profile_name}")
+            except Exception as e:
+                logger.error(f"Error closing driver for profile {profile_name}: {e}")
                 
         except Exception as e:
-            logger.error(f"Error checking orders: {e}")
+            logger.error(f"Error in check_orders for profile {profile_name}: {e}")
+    
+    def _get_all_profiles(self) -> List[str]:
+        """Get all profile names from database"""
+        try:
+            # Get all profiles from database
+            profiles = []
+            saruman_profile = db_manager.get_profile_by_name("Saruman")
+            gandalf_profile = db_manager.get_profile_by_name("Gandalf")
+            
+            if saruman_profile:
+                profiles.append("Saruman")
+            if gandalf_profile:
+                profiles.append("Gandalf")
+            
+            return profiles
+        except Exception as e:
+            logger.error(f"Error getting profiles: {e}")
+            return ["Saruman", "Gandalf"]  # Fallback to default profiles
+    
+    async def process_order_information(self, profile_name: str, order_info: list):
+        """Process the extracted order information from automation page"""
+        try:
+            logger.info(f"Processing order information for {profile_name}")
+            
+            for button_info in order_info:
+                button_index = button_info.get("button_index", "Unknown")
+                rows = button_info.get("rows", [])
+                
+                logger.info(f"Processing button {button_index} with {len(rows)} rows")
+                
+                for row in rows:
+                    try:
+                        # Extract relevant information from each row
+                        main_text = row.get("main_text", "")
+                        href = row.get("href", "")
+                        
+                        # Log the extracted information for now
+                        # You can extend this to parse specific order details and update database
+                        logger.info(f"  Row data: {main_text[:100]}...")
+                        
+                        # Example: Parse order status, coin name, amounts, etc.
+                        # This is where you would implement specific parsing logic
+                        # based on the actual structure of the BullX automation page
+                        
+                        # For now, just output the information
+                        if href:
+                            logger.info(f"    Link: {href}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing row in button {button_index}: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Error processing order information for {profile_name}: {e}")
     
     async def check_single_order(self, order: Order):
         """Check a single order status and re-enter if completed"""
@@ -191,3 +300,15 @@ async def start_background_tasks():
 async def stop_background_tasks():
     """Stop all background tasks"""
     await order_monitor.stop_monitoring()
+
+async def start_background_tasks_for_profile(profile_name: str):
+    """Start background tasks for a specific profile"""
+    await order_monitor.start_monitoring_for_profile(profile_name)
+
+async def stop_background_tasks_for_profile(profile_name: str):
+    """Stop background tasks for a specific profile"""
+    await order_monitor.stop_monitoring_for_profile(profile_name)
+
+async def check_orders_for_profile(profile_name: str):
+    """Manually trigger order check for a specific profile"""
+    await order_monitor.check_orders(profile_name)

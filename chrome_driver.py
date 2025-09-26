@@ -355,6 +355,139 @@ class BullXAutomator:
         except Exception as e:
             logger.error(f"Failed to enter trading parameters: {e}")
             raise
+    
+    def check_orders(self, profile_name: str) -> dict:
+        """
+        Navigate to automation page and check all orders by clicking through buttons
+        and extracting information from the specified XPATHs.
+        
+        Args:
+            profile_name: Chrome profile name
+            
+        Returns:
+            Dict with success status and extracted order information
+        """
+        try:
+            # Ensure we're logged in first
+            if not self._ensure_logged_in(profile_name):
+                return {"success": False, "error": "Failed to login"}
+            
+            driver = self.driver_manager.get_driver(profile_name)
+            
+            # Navigate to automation page
+            automation_url = f"{self.base_url}/automation"
+            logger.info(f"Navigating to automation page: {automation_url}")
+            driver.get(automation_url)
+            
+            # Wait for page to load
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            # Find all buttons with the specified class
+            button_selector = "button.ant-btn.ant-btn-text.ant-btn-sm.\\!px-1"
+            logger.info(f"Looking for buttons with selector: {button_selector}")
+            
+            try:
+                buttons = WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, button_selector))
+                )
+                logger.info(f"Found {len(buttons)} buttons to iterate through")
+            except TimeoutException:
+                logger.warning("No buttons found with the specified selector")
+                return {"success": False, "error": "No buttons found with the specified selector"}
+            
+            order_info_list = []
+            
+            # Iterate through each button
+            for i, button in enumerate(buttons):
+                try:
+                    logger.info(f"Clicking button {i + 1} of {len(buttons)}")
+                    
+                    # Scroll button into view if needed
+                    driver.execute_script("arguments[0].scrollIntoView(true);", button)
+                    time.sleep(0.5)
+                                        
+                    grandParent = button.find_element(By.XPATH, '../..')
+                    grandParent.click()
+                    time.sleep(1)  # Wait for any UI updates
+                    
+                    # Extract information from the specified XPATHs
+                    xpath_selector = "//a[@class='b-table-row row-hover flex-row justify-between w-full h-[36px] border-b border-grey-500 relative cursor-pointer']"
+                    
+                    try:
+                        table_rows = driver.find_elements(By.XPATH, xpath_selector)
+                        logger.info(f"Found {len(table_rows)} table rows after clicking button {i + 1}")
+                        
+                        button_order_info = {
+                            "button_index": i + 1,
+                            "rows": []
+                        }
+                        
+                        # Extract information from each row
+                        for j, row in enumerate(table_rows):
+                            try:
+                                # Get all text content from the row and its subelements
+                                row_text = row.text.strip()
+                                
+                                # Get href attribute if available
+                                href = row.get_attribute("href")
+                                
+                                # Get all child elements and their text
+                                child_elements = row.find_elements(By.XPATH, ".//*")
+                                child_texts = []
+                                for child in child_elements:
+                                    child_text = child.text.strip()
+                                    if child_text:
+                                        child_texts.append({
+                                            "tag": child.tag_name,
+                                            "text": child_text,
+                                            "class": child.get_attribute("class")
+                                        })
+                                
+                                row_info = {
+                                    "row_index": j + 1,
+                                    "main_text": row_text,
+                                    "href": href,
+                                    "child_elements": child_texts
+                                }
+                                
+                                button_order_info["rows"].append(row_info)
+                                logger.info(f"  Row {j + 1}: {row_text[:100]}...")  # Log first 100 chars
+                                
+                            except Exception as e:
+                                logger.error(f"Error extracting info from row {j + 1}: {e}")
+                                button_order_info["rows"].append({
+                                    "row_index": j + 1,
+                                    "error": str(e)
+                                })
+                        
+                        order_info_list.append(button_order_info)
+                        
+                    except Exception as e:
+                        logger.error(f"Error finding table rows after clicking button {i + 1}: {e}")
+                        order_info_list.append({
+                            "button_index": i + 1,
+                            "error": f"Failed to find table rows: {str(e)}"
+                        })
+                    
+                except Exception as e:
+                    logger.error(f"Error clicking button {i + 1}: {e}")
+                    order_info_list.append({
+                        "button_index": i + 1,
+                        "error": f"Failed to click button: {str(e)}"
+                    })
+            
+            return {
+                "success": True,
+                "message": f"Successfully processed {len(buttons)} buttons",
+                "total_buttons": len(buttons),
+                "order_info": order_info_list
+            }
+            
+        except Exception as e:
+            logger.error(f"Order check failed: {e}")
+            return {"success": False, "error": str(e)}
 
 # Global driver manager instance
 chrome_driver_manager = ChromeDriverManager()

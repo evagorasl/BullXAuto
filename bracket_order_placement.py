@@ -53,6 +53,12 @@ class BracketOrderPlacer:
             if not self.automator.search_address(profile_name, address):
                 return {"success": False, "error": "Failed to search address"}
             
+            # Ensure coin data is extracted and stored (including name)
+            driver = self.driver_manager.get_driver(profile_name)
+            coin_data = self.automator._extract_coin_data(driver, address)
+            if coin_data:
+                db_manager.create_or_update_coin(address, coin_data)
+            
             # Get current market cap
             current_market_cap = self.automator.get_market_cap(profile_name)
             if current_market_cap <= 0:

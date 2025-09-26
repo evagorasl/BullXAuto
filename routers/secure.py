@@ -14,6 +14,11 @@ from chrome_driver import bullx_automator, chrome_driver_manager
 from auth import get_current_profile
 from bracket_config import get_bracket_info as get_bracket_config_info, calculate_order_parameters, BRACKET_CONFIG
 from bracket_order_placement import bracket_order_manager
+from background_task_monitor import (
+    get_background_task_health, get_task_execution_history,
+    start_background_tasks_for_profile, stop_background_tasks_for_profile,
+    enhanced_order_monitor
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -796,3 +801,195 @@ def calculate_strategy_prices(strategy_number: int, market_cap: float, order_typ
         'take_profit': round(take_profit, 6),
         'stop_loss': round(stop_loss, 6)
     }
+
+# Background Task Health Monitoring Endpoints
+@router.get("/background-tasks/health")
+async def get_background_task_health(
+    profile_name: Optional[str] = Query(None, description="Get health for specific profile"),
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Get health status of background tasks"""
+    try:
+        # If no profile specified, use current profile
+        target_profile = profile_name or current_profile.name
+        
+        health_status = get_background_task_health(target_profile)
+        
+        return {
+            "success": True,
+            "health_status": health_status,
+            "requested_profile": target_profile
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting background task health: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/background-tasks/history/{profile_name}")
+async def get_background_task_history(
+    profile_name: str,
+    limit: int = Query(20, description="Number of recent tasks to return", ge=1, le=100),
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Get task execution history for a profile"""
+    try:
+        # Validate profile access (users can only see their own profile or if they're admin)
+        if profile_name != current_profile.name:
+            # For now, allow access to both profiles - you might want to add admin check here
+            if profile_name not in ["Saruman", "Gandalf"]:
+                raise HTTPException(status_code=403, detail="Access denied to this profile")
+        
+        history = get_task_execution_history(profile_name, limit)
+        
+        return {
+            "success": True,
+            "profile_name": profile_name,
+            "history": history,
+            "total_returned": len(history)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting task execution history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/background-tasks/start/{profile_name}")
+async def start_background_monitoring(
+    profile_name: str,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Start background task monitoring for a specific profile"""
+    try:
+        # Validate profile access
+        if profile_name != current_profile.name:
+            if profile_name not in ["Saruman", "Gandalf"]:
+                raise HTTPException(status_code=403, detail="Access denied to this profile")
+        
+        await start_background_tasks_for_profile(profile_name)
+        
+        return {
+            "success": True,
+            "message": f"Background monitoring started for profile: {profile_name}",
+            "profile_name": profile_name
+        }
+        
+    except Exception as e:
+        logger.error(f"Error starting background monitoring: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/background-tasks/stop/{profile_name}")
+async def stop_background_monitoring(
+    profile_name: str,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Stop background task monitoring for a specific profile"""
+    try:
+        # Validate profile access
+        if profile_name != current_profile.name:
+            if profile_name not in ["Saruman", "Gandalf"]:
+                raise HTTPException(status_code=403, detail="Access denied to this profile")
+        
+        await stop_background_tasks_for_profile(profile_name)
+        
+        return {
+            "success": True,
+            "message": f"Background monitoring stopped for profile: {profile_name}",
+            "profile_name": profile_name
+        }
+        
+    except Exception as e:
+        logger.error(f"Error stopping background monitoring: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/background-tasks/manual-check/{profile_name}")
+async def manual_background_check(
+    profile_name: str,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Manually trigger a background task check for a specific profile"""
+    try:
+        # Validate profile access
+        if profile_name != current_profile.name:
+            if profile_name not in ["Saruman", "Gandalf"]:
+                raise HTTPException(status_code=403, detail="Access denied to this profile")
+        
+        # Trigger manual check using the enhanced monitor
+        await enhanced_order_monitor._execute_monitored_task(profile_name)
+        
+        return {
+            "success": True,
+            "message": f"Manual background check completed for profile: {profile_name}",
+            "profile_name": profile_name
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in manual background check: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/background-tasks/status")
+async def get_background_tasks_status(current_profile: Profile = Depends(get_current_profile)):
+    """Get overall status of background task system"""
+    try:
+        # Get health for all monitored profiles
+        health_status = get_background_task_health()
+        
+        # Get additional system info
+        system_status = {
+            "scheduler_running": enhanced_order_monitor.is_running,
+            "monitored_profiles": list(enhanced_order_monitor.monitored_profiles),
+            "total_monitored_profiles": len(enhanced_order_monitor.monitored_profiles),
+            "task_timeout_seconds": enhanced_order_monitor.task_timeout,
+            "max_history_size": enhanced_order_monitor.max_history_size
+        }
+        
+        return {
+            "success": True,
+            "system_status": system_status,
+            "health_status": health_status
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting background tasks status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/background-tasks/missed-tasks/{profile_name}")
+async def get_missed_tasks(
+    profile_name: str,
+    hours: int = Query(24, description="Look back this many hours for missed tasks", ge=1, le=168),
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Get missed tasks for a profile within a time window"""
+    try:
+        # Validate profile access
+        if profile_name != current_profile.name:
+            if profile_name not in ["Saruman", "Gandalf"]:
+                raise HTTPException(status_code=403, detail="Access denied to this profile")
+        
+        # Get task history
+        history = get_task_execution_history(profile_name, limit=100)
+        
+        # Filter for missed tasks within the time window
+        from datetime import datetime, timedelta
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        
+        missed_tasks = []
+        for task in history:
+            if task.get("missed", False):
+                task_time = datetime.fromisoformat(task["scheduled_time"])
+                if task_time >= cutoff_time:
+                    missed_tasks.append(task)
+        
+        return {
+            "success": True,
+            "profile_name": profile_name,
+            "hours_looked_back": hours,
+            "missed_tasks": missed_tasks,
+            "total_missed": len(missed_tasks)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting missed tasks: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

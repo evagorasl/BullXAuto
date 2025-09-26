@@ -9,7 +9,7 @@ import os
 # Import our modules
 from database import create_tables, init_profiles
 from chrome_driver import chrome_driver_manager
-from background_tasks import start_background_tasks, stop_background_tasks
+from background_task_monitor import start_background_tasks, stop_background_tasks
 from routers import secure_router, public_router
 from middleware import CloseDriverMiddleware
 

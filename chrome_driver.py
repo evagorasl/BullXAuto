@@ -427,33 +427,20 @@ class BullXAutomator:
                         # Extract information from each row
                         for j, row in enumerate(table_rows):
                             try:
-                                # Get all text content from the row and its subelements
+                                # Get all text content from the row
                                 row_text = row.text.strip()
                                 
                                 # Get href attribute if available
                                 href = row.get_attribute("href")
                                 
-                                # Get all child elements and their text
-                                child_elements = row.find_elements(By.XPATH, ".//*")
-                                child_texts = []
-                                for child in child_elements:
-                                    child_text = child.text.strip()
-                                    if child_text:
-                                        child_texts.append({
-                                            "tag": child.tag_name,
-                                            "text": child_text,
-                                            "class": child.get_attribute("class")
-                                        })
-                                
                                 row_info = {
                                     "row_index": j + 1,
                                     "main_text": row_text,
-                                    "href": href,
-                                    "child_elements": child_texts
+                                    "href": href
                                 }
                                 
                                 button_order_info["rows"].append(row_info)
-                                logger.info(f"  Row {j + 1}: {row_text[:100]}...")  # Log first 100 chars
+                                #logger.info(f"  Row {j + 1}: {row_text[:100]}...")  # Log first 100 chars
                                 
                             except Exception as e:
                                 logger.error(f"Error extracting info from row {j + 1}: {e}")

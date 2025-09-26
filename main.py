@@ -7,11 +7,12 @@ import logging
 import os
 
 # Import our modules
-from database import create_tables, init_profiles
+from database import create_tables, init_profiles, db_manager
 from chrome_driver import chrome_driver_manager
-from background_task_monitor import start_background_tasks, stop_background_tasks
+from background_task_monitor import enhanced_order_monitor
 from routers import secure_router, public_router
 from middleware import CloseDriverMiddleware
+from auto_monitoring_middleware import AutoMonitoringMiddleware
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,8 +28,8 @@ async def lifespan(app: FastAPI):
     create_tables()
     init_profiles()
     
-    # Start background tasks
-    await start_background_tasks()
+    # Start background monitoring for active profiles
+    await start_monitoring_for_active_profiles()
     
     logger.info("BullX Automation API started successfully")
     
@@ -37,13 +38,46 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down BullX Automation API...")
     
-    # Stop background tasks
-    await stop_background_tasks()
+    # Stop all background tasks
+    await enhanced_order_monitor.stop_monitoring()
     
     # Close all Chrome drivers
     chrome_driver_manager.close_all_drivers()
     
     logger.info("BullX Automation API shut down successfully")
+
+async def start_monitoring_for_active_profiles():
+    """Start background monitoring only for profiles that have active orders"""
+    try:
+        # Get profiles by checking for active orders
+        active_profiles = set()
+        active_orders = db_manager.get_active_orders()
+        for order in active_orders:
+            active_profiles.add(order.profile_name)
+        
+        # If no active orders, don't start any monitoring yet
+        # Monitoring will be started when users make their first API call
+        if not active_profiles:
+            logger.info("No active profiles with orders found. Background monitoring will start when users make API calls.")
+            return
+        
+        # Start monitoring for profiles with active orders
+        for profile_name in active_profiles:
+            await enhanced_order_monitor.start_monitoring_for_profile(profile_name)
+            logger.info(f"Started background monitoring for profile: {profile_name}")
+        
+    except Exception as e:
+        logger.error(f"Error starting monitoring for active profiles: {e}")
+        # Don't fail startup if background monitoring fails
+
+async def ensure_monitoring_for_profile(profile_name: str):
+    """Ensure background monitoring is started for a profile when they make API calls"""
+    try:
+        if profile_name not in enhanced_order_monitor.monitored_profiles:
+            await enhanced_order_monitor.start_monitoring_for_profile(profile_name)
+            logger.info(f"Started background monitoring for profile: {profile_name} (triggered by API usage)")
+    except Exception as e:
+        logger.error(f"Error starting monitoring for profile {profile_name}: {e}")
 
 # Create FastAPI app
 app = FastAPI(
@@ -54,6 +88,7 @@ app = FastAPI(
 )
 
 # Add middleware
+app.add_middleware(AutoMonitoringMiddleware)
 app.add_middleware(CloseDriverMiddleware)
 app.add_middleware(
     CORSMiddleware,

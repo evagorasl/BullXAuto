@@ -56,16 +56,30 @@ class BracketOrderPlacer:
             # Ensure coin data is extracted and stored (including name)
             driver = self.driver_manager.get_driver(profile_name)
             coin_data = self.automator._extract_coin_data(driver, address)
-            if coin_data:
-                db_manager.create_or_update_coin(address, coin_data)
             
             # Get current market cap
             current_market_cap = self.automator.get_market_cap(profile_name)
             if current_market_cap <= 0:
                 return {"success": False, "error": "Failed to get market cap"}
             
-            # Calculate bracket and order parameters
+            # Calculate bracket and ensure coin data includes bracket and current market cap
             bracket = calculate_bracket(current_market_cap)
+            
+            # Update coin data with bracket and current market cap
+            if coin_data:
+                coin_data["bracket"] = bracket
+                coin_data["market_cap"] = current_market_cap
+            else:
+                coin_data = {
+                    "bracket": bracket,
+                    "market_cap": current_market_cap
+                }
+            
+            # Store/update coin information with bracket
+            db_manager.create_or_update_coin(address, coin_data)
+            logger.info(f"Stored coin information: bracket {bracket}, market cap ${current_market_cap:,.0f}")
+            
+            # Get bracket info and calculate order parameters
             bracket_info = get_bracket_info(bracket)
             order_params = calculate_order_parameters(bracket, total_amount)
             

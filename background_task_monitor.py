@@ -98,29 +98,22 @@ class EnhancedOrderMonitor:
             # Execute the actual order checking task
             logger.info(f"Starting enhanced order check for profile: {profile_name}")
             
-            # Import the API function to reuse the logic
-            from routers.secure import check_orders_service
+            # Use the background tasks order monitor directly
+            from background_tasks import order_monitor
             
-            result = await asyncio.wait_for(
-                check_orders_service(profile_name),
+            # Execute the order check using the same logic as background tasks
+            await asyncio.wait_for(
+                order_monitor.check_orders(profile_name),
                 timeout=self.task_timeout
             )
             
-            if result["success"]:
-                task_execution.success = True
-                task_execution.orders_processed = result.get('total_buttons', 0)
-                logger.info(f"Successfully processed {task_execution.orders_processed} buttons for {profile_name}")
-                
-                # Process the extracted order information
-                await self.process_order_information(profile_name, result["order_info"])
-                
-                # Update last successful run time
-                self.last_successful_run[profile_name] = datetime.now()
-                
-            else:
-                task_execution.success = False
-                task_execution.error_message = result.get('error', 'Unknown error')
-                logger.error(f"Order check failed for {profile_name}: {task_execution.error_message}")
+            # If we get here without exception, the task was successful
+            task_execution.success = True
+            task_execution.orders_processed = 1  # We processed one check cycle
+            logger.info(f"Successfully completed order check for {profile_name}")
+            
+            # Update last successful run time
+            self.last_successful_run[profile_name] = datetime.now()
             
             # Also check individual active orders from database for this profile
             active_orders = db_manager.get_active_orders_by_profile(profile_name)

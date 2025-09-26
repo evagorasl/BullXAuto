@@ -169,6 +169,14 @@ class DatabaseManager:
         finally:
             db.close()
     
+    def get_coin_by_name(self, name: str) -> Optional[Coin]:
+        """Get coin by name"""
+        db = self.SessionLocal()
+        try:
+            return db.query(Coin).filter(Coin.name == name).first()
+        finally:
+            db.close()
+    
     def create_or_update_coin(self, address: str, data: Dict[str, Any]) -> Coin:
         """Create a new coin or update an existing one"""
         db = self.SessionLocal()

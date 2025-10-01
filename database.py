@@ -519,6 +519,104 @@ class DatabaseManager:
             return summary
         finally:
             db.close()
+    
+    def clear_coin_data(self, address: str, profile_name: str, orders_only: bool = False) -> dict:
+        """Clear coin data and/or orders from database"""
+        db = self.SessionLocal()
+        try:
+            # Get the coin
+            coin = db.query(Coin).filter(Coin.address == address).first()
+            if not coin:
+                return {"success": False, "error": "Coin not found"}
+            
+            # Count orders to be cleared for this profile
+            orders_to_clear = db.query(Order).filter(
+                Order.coin_id == coin.id,
+                Order.profile_name == profile_name
+            ).all()
+            
+            orders_cleared = len(orders_to_clear)
+            
+            # Delete orders for this profile
+            for order in orders_to_clear:
+                db.delete(order)
+            
+            coin_removed = False
+            if not orders_only:
+                # Check if there are any remaining orders for this coin from other profiles
+                remaining_orders = db.query(Order).filter(
+                    Order.coin_id == coin.id
+                ).count()
+                
+                # If no orders remain, delete the coin
+                if remaining_orders == 0:
+                    db.delete(coin)
+                    coin_removed = True
+            
+            db.commit()
+            
+            return {
+                "success": True,
+                "orders_cleared": orders_cleared,
+                "coin_removed": coin_removed
+            }
+            
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+    
+    def clear_all_profile_data(self, profile_name: str) -> dict:
+        """Clear all coins and orders for a specific profile"""
+        db = self.SessionLocal()
+        try:
+            # Get all orders for this profile
+            orders_to_clear = db.query(Order).filter(
+                Order.profile_name == profile_name
+            ).all()
+            
+            orders_cleared = len(orders_to_clear)
+            
+            # Get unique coin IDs from these orders
+            coin_ids_with_orders = set(order.coin_id for order in orders_to_clear)
+            
+            # Delete all orders for this profile
+            for order in orders_to_clear:
+                db.delete(order)
+            
+            # Check which coins can be deleted (no remaining orders from other profiles)
+            coins_to_delete = []
+            for coin_id in coin_ids_with_orders:
+                remaining_orders = db.query(Order).filter(
+                    Order.coin_id == coin_id,
+                    Order.profile_name != profile_name
+                ).count()
+                
+                if remaining_orders == 0:
+                    coin = db.query(Coin).filter(Coin.id == coin_id).first()
+                    if coin:
+                        coins_to_delete.append(coin)
+            
+            # Delete coins with no remaining orders
+            for coin in coins_to_delete:
+                db.delete(coin)
+            
+            coins_cleared = len(coins_to_delete)
+            
+            db.commit()
+            
+            return {
+                "success": True,
+                "orders_cleared": orders_cleared,
+                "coins_cleared": coins_cleared
+            }
+            
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
 
 # Global database manager instance
 db_manager = DatabaseManager()

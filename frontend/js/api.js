@@ -279,6 +279,27 @@ class BullXAPI {
     async getMarketCap(address) {
         return this.request('GET', `/api/v1/market-cap/${address}`);
     }
+
+    /**
+     * Clear coin data and/or orders from database
+     * @param {string} address - Token address
+     * @param {boolean} ordersOnly - If true, only clear orders. If false, clear coin and all its orders
+     * @returns {Promise} - Promise that resolves to the clear result
+     */
+    async clearCoinData(address, ordersOnly = false) {
+        const params = new URLSearchParams({
+            clear_orders_only: ordersOnly
+        });
+        return this.request('DELETE', `/api/v1/coins/${address}?${params}`);
+    }
+
+    /**
+     * Clear all coins and orders for the current profile
+     * @returns {Promise} - Promise that resolves to the clear result
+     */
+    async clearAllData() {
+        return this.request('DELETE', '/api/v1/clear-all-data');
+    }
 }
 
 // Create a global API client instance

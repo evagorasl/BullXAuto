@@ -13,36 +13,36 @@ def test_new_bracket_calculation():
     print("Testing new bracket calculation...")
     
     test_cases = [
-        # Bracket 1: 20K - 120K
+        # Bracket 1: 20K - 200K
         (50000, 1, "Micro Cap - middle range"),
         (20000, 1, "Micro Cap - minimum"),
-        (120000, 1, "Micro Cap - maximum"),
+        (199999, 1, "Micro Cap - maximum"),
         (19999, 1, "Below minimum - defaults to bracket 1"),
         
-        # Bracket 2: 200K - 1.2M
+        # Bracket 2: 200K - 2M
         (500000, 2, "Small Cap - middle range"),
         (200000, 2, "Small Cap - minimum"),
-        (1200000, 2, "Small Cap - maximum"),
+        (1999999, 2, "Small Cap - maximum"),
         
-        # Bracket 3: 2M - 12M
+        # Bracket 3: 2M - 20M
         (5000000, 3, "Medium Cap - middle range"),
         (2000000, 3, "Medium Cap - minimum"),
-        (12000000, 3, "Medium Cap - maximum"),
+        (19999999, 3, "Medium Cap - maximum"),
         
-        # Bracket 4: 12M - 120M
+        # Bracket 4: 20M - 120M
         (50000000, 4, "Large Cap - middle range"),
-        (12000001, 4, "Large Cap - just above minimum"),
-        (120000000, 4, "Large Cap - maximum"),
+        (20000000, 4, "Large Cap - minimum"),
+        (119999999, 4, "Large Cap - maximum"),
         
         # Bracket 5: 120M - 1.2B
         (500000000, 5, "Mega Cap - middle range"),
-        (120000001, 5, "Mega Cap - just above minimum"),
-        (1200000000, 5, "Mega Cap - maximum"),
+        (120000000, 5, "Mega Cap - minimum"),
+        (1199999999, 5, "Mega Cap - maximum"),
         
         # Edge cases
-        (150000, 1, "Between bracket 1 and 2 - defaults to 1"),
-        (1500000, 1, "Between bracket 2 and 3 - defaults to 1"),
-        (15000000, 4, "Between bracket 3 and 4 - goes to bracket 4"),
+        (150000, 1, "Middle of bracket 1"),
+        (1500000, 2, "Middle of bracket 2"),
+        (15000000, 3, "Middle of bracket 3"),
         (2000000000, 1, "Above maximum - defaults to 1")
     ]
     
@@ -64,11 +64,11 @@ def test_bracket_info():
     print("\nTesting bracket information...")
     
     expected_ranges = {
-        1: (20000, 120000, "Micro Cap (20K - 120K)"),
-        2: (200000, 1200000, "Small Cap (200K - 1.2M)"),
-        3: (2000000, 12000000, "Medium Cap (2M - 12M)"),
-        4: (12000000, 120000000, "Large Cap (12M - 120M)"),
-        5: (120000000, 1200000000, "Mega Cap (120M - 1.2B)")
+        1: (20000, 199999, "Micro Cap (20K - 200K)"),
+        2: (200000, 1999999, "Small Cap (200K - 2M)"),
+        3: (2000000, 19999999, "Medium Cap (2M - 20M)"),
+        4: (20000000, 119999999, "Large Cap (20M - 120M)"),
+        5: (120000000, 1199999999, "Mega Cap (120M - 1.2B)")
     }
     
     all_passed = True
@@ -247,7 +247,7 @@ def run_all_tests():
     if passed == total:
         print("🎉 All tests passed! The new bracket system is working correctly.")
         print("\nKey Features Verified:")
-        print("- New market cap ranges (20K-120K, 200K-1.2M, 2M-12M, 12M-120M, 120M-1.2B)")
+        print("- New market cap ranges (20K-200K, 200K-2M, 2M-20M, 20M-120M, 120M-1.2B)")
         print("- Trade sizes: 33.33%, 33.33%, 16.67%, 16.67%")
         print("- Take profit percentages: 112%, 89%, 81%, 56%")
         print("- Bracket-specific entry points and stop losses")

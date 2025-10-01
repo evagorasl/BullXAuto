@@ -5,11 +5,11 @@ This file contains all bracket-related parameters that can be easily modified.
 
 # Market cap ranges for each bracket
 BRACKET_RANGES = {
-    1: {"min": 20000, "max": 120000},
-    2: {"min": 200000, "max": 1200000},
-    3: {"min": 2000000, "max": 12000000},
-    4: {"min": 12000000, "max": 120000000},
-    5: {"min": 120000000, "max": 1200000000}
+    1: {"min": 20000, "max": 199999},
+    2: {"min": 200000, "max": 1999999},
+    3: {"min": 2000000, "max": 19999999},
+    4: {"min": 20000000, "max": 119999999},
+    5: {"min": 120000000, "max": 1199999999}
 }
 
 # Trade sizes for each bracket_id (order within bracket)
@@ -24,22 +24,22 @@ BRACKET_CONFIG = {
     1: {
         "stop_loss_market_cap": 7800,
         "entries": [9310, 13100, 23100, 33100],
-        "description": "Micro Cap (20K - 120K)"
+        "description": "Micro Cap (20K - 200K)"
     },
     2: {
         "stop_loss_market_cap": 78000,
         "entries": [93100, 131000, 231000, 331000],
-        "description": "Small Cap (200K - 1.2M)"
+        "description": "Small Cap (200K - 2M)"
     },
     3: {
         "stop_loss_market_cap": 780000,
         "entries": [931000, 1310000, 2310000, 3310000],
-        "description": "Medium Cap (2M - 12M)"
+        "description": "Medium Cap (2M - 20M)"
     },
     4: {
         "stop_loss_market_cap": 7800000,
         "entries": [9310000, 13100000, 23100000, 33100000],
-        "description": "Large Cap (12M - 120M)"
+        "description": "Large Cap (20M - 120M)"
     },
     5: {
         "stop_loss_market_cap": 78000000,
@@ -50,15 +50,15 @@ BRACKET_CONFIG = {
 
 def calculate_bracket(market_cap: float) -> int:
     """Calculate bracket based on market cap"""
-    if market_cap >= 20000 and market_cap <= 120000:
+    if market_cap >= 20000 and market_cap < 200000:
         return 1
-    elif market_cap >= 200000 and market_cap <= 1200000:
+    elif market_cap >= 200000 and market_cap < 2000000:
         return 2
-    elif market_cap >= 2000000 and market_cap <= 12000000:
+    elif market_cap >= 2000000 and market_cap < 20000000:
         return 3
-    elif market_cap > 12000000 and market_cap <= 120000000:
+    elif market_cap >= 20000000 and market_cap < 120000000:
         return 4
-    elif market_cap > 120000000 and market_cap <= 1200000000:
+    elif market_cap >= 120000000 and market_cap < 1200000000:
         return 5
     else:
         # Default to bracket 1 for market caps outside defined ranges

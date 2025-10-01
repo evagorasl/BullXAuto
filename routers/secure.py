@@ -981,3 +981,60 @@ async def get_missed_tasks(
     except Exception as e:
         logger.error(f"Error getting missed tasks: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Clear database endpoints
+@router.delete("/coins/{address}")
+async def clear_coin_data(
+    address: str,
+    clear_orders_only: bool = Query(False, description="If true, only clear orders. If false, clear coin and all its orders"),
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Clear coin data and/or orders from database"""
+    try:
+        logger.info(f"Clear coin data request for address: {address}, orders_only: {clear_orders_only}, profile: {current_profile.name}")
+        
+        result = db_manager.clear_coin_data(
+            address=address,
+            profile_name=current_profile.name,
+            orders_only=clear_orders_only
+        )
+        
+        if result["success"]:
+            action = "orders cleared" if clear_orders_only else "coin and orders cleared"
+            return {
+                "success": True,
+                "message": f"Successfully {action} for coin {address}",
+                "orders_cleared": result["orders_cleared"],
+                "coin_removed": result.get("coin_removed", False),
+                "profile": current_profile.name
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"Coin with address {address} not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Clear coin data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/clear-all-data")
+async def clear_all_data(
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Clear all coins and orders for the current profile"""
+    try:
+        logger.info(f"Clear all data request for profile: {current_profile.name}")
+        
+        result = db_manager.clear_all_profile_data(current_profile.name)
+        
+        return {
+            "success": True,
+            "message": f"Successfully cleared all data for profile {current_profile.name}",
+            "coins_cleared": result["coins_cleared"],
+            "orders_cleared": result["orders_cleared"],
+            "profile": current_profile.name
+        }
+        
+    except Exception as e:
+        logger.error(f"Clear all data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

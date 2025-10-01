@@ -144,6 +144,15 @@ header h1 i {
     background-color: #c0392b;
 }
 
+.btn-warning {
+    background-color: var(--warning-color);
+    color: white;
+}
+
+.btn-warning:hover {
+    background-color: #e67e22;
+}
+
 /* Dashboard Grid */
 .dashboard-grid {
     display: grid;
@@ -269,6 +278,63 @@ input[type="checkbox"]:checked + .toggle-label {
 
 input[type="checkbox"]:checked + .toggle-label:after {
     left: 28px;
+}
+
+/* Radio Button Styles */
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    font-size: 0.95rem;
+    gap: 12px;
+    padding: 8px 0;
+}
+
+.radio-label input[type="radio"] {
+    display: none;
+}
+
+.radio-custom {
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border-color);
+    border-radius: 50%;
+    position: relative;
+    transition: all 0.3s ease;
+    flex-shrink: 0;
+}
+
+.radio-custom:before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: var(--primary-color);
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(0);
+    transition: transform 0.3s ease;
+}
+
+.radio-label input[type="radio"]:checked + .radio-custom {
+    border-color: var(--primary-color);
+}
+
+.radio-label input[type="radio"]:checked + .radio-custom:before {
+    transform: translate(-50%, -50%) scale(1);
+}
+
+.radio-text {
+    line-height: 1.4;
+    flex: 1;
 }
 
 /* Modal */

@@ -50,8 +50,8 @@ function setupEventListeners() {
     // Search button
     document.getElementById('search-btn').addEventListener('click', handleSearch);
     
-    // Strategy button
-    document.getElementById('strategy-btn').addEventListener('click', handleStrategy);
+    // Strategy button - removed as it doesn't exist in HTML
+    // document.getElementById('strategy-btn').addEventListener('click', handleStrategy);
     
     // Refresh orders button
     document.getElementById('refresh-orders-btn').addEventListener('click', loadOrders);
@@ -59,20 +59,22 @@ function setupEventListeners() {
     // Refresh coins button
     document.getElementById('refresh-coins-btn').addEventListener('click', loadCoins);
     
-    // Advanced options toggle
-    document.getElementById('advanced-toggle').addEventListener('change', (e) => {
-        const advancedOptions = document.getElementById('advanced-options');
-        if (e.target.checked) {
-            advancedOptions.classList.remove('hidden');
-        } else {
-            advancedOptions.classList.add('hidden');
-        }
-    });
+    // Advanced options toggle - removed as it doesn't exist in HTML
+    // document.getElementById('advanced-toggle').addEventListener('change', (e) => {
+    //     const advancedOptions = document.getElementById('advanced-options');
+    //     if (e.target.checked) {
+    //         advancedOptions.classList.remove('hidden');
+    //     } else {
+    //         advancedOptions.classList.add('hidden');
+    //     }
+    // });
     
     // Bracket strategy event listeners
     document.getElementById('get-market-cap-btn').addEventListener('click', handleGetMarketCap);
     document.getElementById('preview-bracket-btn').addEventListener('click', handlePreviewBracket);
     document.getElementById('execute-bracket-btn').addEventListener('click', handleExecuteBracket);
+    
+    // Clear database event listeners will be set up after login when dashboard is visible
     
     // Modal close button
     document.querySelector('.close').addEventListener('click', () => {
@@ -126,6 +128,9 @@ async function handleLogin() {
         // Load initial data
         loadOrders();
         loadCoins();
+        
+        // Setup clear database event listeners now that dashboard is visible
+        setupClearDatabaseEventListeners();
         
         // Show success message
         showMessage('login-message', 'Login successful!', 'success');
@@ -393,6 +398,8 @@ async function loadCoins() {
         if (coins.length === 0) {
             coinsBody.innerHTML = '';
             noCoinsMessage.style.display = 'block';
+            // Clear the dropdown as well
+            updateCoinDropdown([]);
             return;
         }
         
@@ -427,6 +434,9 @@ async function loadCoins() {
             
             coinsBody.appendChild(row);
         });
+        
+        // Update the clear database dropdown
+        updateCoinDropdown(coins);
         
         // Add event listeners to view orders buttons
         document.querySelectorAll('.view-orders').forEach(button => {
@@ -526,14 +536,13 @@ function formatNumber(number) {
 }
 
 /**
- * Truncate an address for display
- * @param {string} address - Address to truncate
- * @returns {string} - Truncated address
+ * Display an address (no longer truncating as requested)
+ * @param {string} address - Address to display
+ * @returns {string} - Full address
  */
 function truncateAddress(address) {
     if (!address) return 'N/A';
-    if (address.length <= 16) return address;
-    return `${address.substring(0, 8)}...${address.substring(address.length - 8)}`;
+    return address;
 }
 
 /**
@@ -543,10 +552,10 @@ function truncateAddress(address) {
  */
 function getBracketDescription(bracket) {
     const descriptions = {
-        1: 'Micro Cap (20K - 120K)',
-        2: 'Small Cap (200K - 1.2M)',
-        3: 'Medium Cap (2M - 12M)',
-        4: 'Large Cap (12M - 120M)',
+        1: 'Micro Cap (20K - 200K)',
+        2: 'Small Cap (200K - 2M)',
+        3: 'Medium Cap (2M - 20M)',
+        4: 'Large Cap (20M - 120M)',
         5: 'Mega Cap (120M - 1.2B)'
     };
     return descriptions[bracket] || 'Unknown';
@@ -558,15 +567,15 @@ function getBracketDescription(bracket) {
  * @returns {number} - Bracket number (1-5)
  */
 function calculateBracketFromMarketCap(marketCap) {
-    if (marketCap >= 20000 && marketCap <= 120000) {
+    if (marketCap >= 20000 && marketCap < 200000) {
         return 1;
-    } else if (marketCap >= 200000 && marketCap <= 1200000) {
+    } else if (marketCap >= 200000 && marketCap < 2000000) {
         return 2;
-    } else if (marketCap >= 2000000 && marketCap <= 12000000) {
+    } else if (marketCap >= 2000000 && marketCap < 20000000) {
         return 3;
-    } else if (marketCap > 12000000 && marketCap <= 120000000) {
+    } else if (marketCap >= 20000000 && marketCap < 120000000) {
         return 4;
-    } else if (marketCap > 120000000 && marketCap <= 1200000000) {
+    } else if (marketCap >= 120000000 && marketCap < 1200000000) {
         return 5;
     } else {
         // Default to bracket 1 for market caps outside defined ranges
@@ -941,4 +950,267 @@ function formatMarketCapWithClass(marketCap) {
     const className = classes[bracket] || '';
     
     return `<span class="market-cap ${className}">$${formatNumber(marketCap)}</span>`;
+}
+
+/**
+ * Update the coin dropdown for clear database section
+ * @param {Array} coins - Array of coin objects
+ */
+function updateCoinDropdown(coins) {
+    const dropdown = document.getElementById('clear-coin-select');
+    
+    // Clear existing options except the first one
+    dropdown.innerHTML = '<option value="">-- Select a coin to clear, or leave empty to clear all --</option>';
+    
+    // Add coin options
+    coins.forEach(coin => {
+        const option = document.createElement('option');
+        option.value = coin.address;
+        option.textContent = `${coin.name || 'Unknown'} (${truncateAddress(coin.address)})`;
+        dropdown.appendChild(option);
+    });
+}
+
+/**
+ * Handle clear specific coin button click
+ */
+async function handleClearSpecific() {
+    console.log('Clear Specific button clicked!');
+    
+    const dropdown = document.getElementById('clear-coin-select');
+    const address = dropdown.value.trim();
+    
+    console.log('Selected address:', address);
+    
+    if (!address) {
+        console.log('No address selected, showing error message');
+        showClearMessage('Please select a coin to clear', 'error');
+        alert('Please select a coin to clear'); // Add alert for immediate feedback
+        return;
+    }
+    
+    // Get the selected clear option
+    const clearOption = document.querySelector('input[name="clear-option"]:checked').value;
+    const ordersOnly = clearOption === 'orders-only';
+    
+    console.log('Clear option:', clearOption, 'Orders only:', ordersOnly);
+    
+    // Get coin name for display
+    const selectedOption = dropdown.options[dropdown.selectedIndex];
+    const coinName = selectedOption.textContent;
+    
+    console.log('Coin name:', coinName);
+    
+    const actionText = ordersOnly ? 'clear orders for' : 'clear coin and orders for';
+    const confirmed = confirm(`Are you sure you want to ${actionText} ${coinName}? This action cannot be undone.`);
+    
+    if (!confirmed) {
+        console.log('User cancelled operation');
+        return;
+    }
+    
+    console.log('Starting clear operation...');
+    
+    try {
+        // Show loading state
+        const button = document.getElementById('clear-specific-btn');
+        const originalText = button.innerHTML;
+        button.innerHTML = '<span class="loading-spinner"></span>Clearing...';
+        button.disabled = true;
+        
+        console.log('Calling API clearCoinData with:', address, ordersOnly);
+        
+        // Clear coin data
+        const result = await api.clearCoinData(address, ordersOnly);
+        
+        console.log('API result:', result);
+        
+        if (result.success) {
+            // Show success result
+            const resultDetails = document.getElementById('clear-details');
+            let message = `Successfully cleared data for ${coinName}:\n`;
+            message += `• Orders cleared: ${result.orders_cleared}\n`;
+            
+            if (result.coin_removed) {
+                message += `• Coin removed from database\n`;
+            } else if (!ordersOnly) {
+                message += `• Coin kept (has orders from other profiles)\n`;
+            }
+            
+            resultDetails.innerHTML = `
+                <div class="result-success">
+                    <h4>Clear Operation Completed</h4>
+                    <pre>${message}</pre>
+                </div>
+            `;
+            
+            // Show the result section
+            document.getElementById('clear-result').classList.remove('hidden');
+            
+            // Reset the dropdown
+            dropdown.selectedIndex = 0;
+            
+            // Refresh data
+            loadOrders();
+            loadCoins();
+            
+            showClearMessage(`Successfully ${actionText} ${coinName}`, 'success');
+            alert(`Success! ${actionText} ${coinName}`); // Add alert for immediate feedback
+        } else {
+            console.error('Clear operation failed:', result);
+            showClearMessage('Failed to clear coin data', 'error');
+            alert('Failed to clear coin data');
+        }
+    } catch (error) {
+        console.error('Error clearing coin data:', error);
+        showClearMessage(`Error: ${error.message}`, 'error');
+        alert(`Error: ${error.message}`);
+    } finally {
+        // Reset button state
+        const button = document.getElementById('clear-specific-btn');
+        button.innerHTML = '<i class="fas fa-trash"></i> Clear Specific Coin';
+        button.disabled = false;
+    }
+}
+
+/**
+ * Handle clear all data button click
+ */
+async function handleClearAll() {
+    console.log('Clear All Data button clicked!');
+    
+    const confirmed = confirm('Are you sure you want to clear ALL coins and orders for your profile? This action cannot be undone and will remove all your data from the database.');
+    
+    if (!confirmed) {
+        console.log('User cancelled first confirmation');
+        return;
+    }
+    
+    // Double confirmation for this destructive action
+    const doubleConfirmed = confirm('This will permanently delete ALL your coins and orders. Are you absolutely sure?');
+    
+    if (!doubleConfirmed) {
+        console.log('User cancelled second confirmation');
+        return;
+    }
+    
+    console.log('Starting clear all operation...');
+    
+    try {
+        // Show loading state
+        const button = document.getElementById('clear-all-btn');
+        const originalText = button.innerHTML;
+        button.innerHTML = '<span class="loading-spinner"></span>Clearing All...';
+        button.disabled = true;
+        
+        console.log('Calling API clearAllData...');
+        
+        // Clear all data
+        const result = await api.clearAllData();
+        
+        console.log('Clear All API result:', result);
+        
+        if (result.success) {
+            // Show success result
+            const resultDetails = document.getElementById('clear-details');
+            let message = `Successfully cleared all data for your profile:\n`;
+            message += `• Orders cleared: ${result.orders_cleared}\n`;
+            message += `• Coins cleared: ${result.coins_cleared}\n`;
+            
+            resultDetails.innerHTML = `
+                <div class="result-success">
+                    <h4>Clear All Operation Completed</h4>
+                    <pre>${message}</pre>
+                </div>
+            `;
+            
+            // Show the result section
+            document.getElementById('clear-result').classList.remove('hidden');
+            
+            // Reset the dropdown
+            const clearDropdown = document.getElementById('clear-coin-select');
+            if (clearDropdown) {
+                clearDropdown.selectedIndex = 0;
+            }
+            
+            // Refresh data
+            loadOrders();
+            loadCoins();
+            
+            showClearMessage(`Successfully cleared all data. ${result.orders_cleared} orders and ${result.coins_cleared} coins removed.`, 'success');
+            alert(`Success! Cleared ${result.orders_cleared} orders and ${result.coins_cleared} coins.`); // Add alert for immediate feedback
+        } else {
+            console.error('Clear All operation failed:', result);
+            showClearMessage('Failed to clear all data', 'error');
+            alert('Failed to clear all data');
+        }
+    } catch (error) {
+        console.error('Error clearing all data:', error);
+        showClearMessage(`Error: ${error.message}`, 'error');
+        alert(`Error: ${error.message}`);
+    } finally {
+        // Reset button state
+        const button = document.getElementById('clear-all-btn');
+        button.innerHTML = '<i class="fas fa-trash-alt"></i> Clear All Data';
+        button.disabled = false;
+    }
+}
+
+/**
+ * Setup clear database event listeners (called after login when dashboard is visible)
+ */
+function setupClearDatabaseEventListeners() {
+    const clearSpecificBtn = document.getElementById('clear-specific-btn');
+    const clearAllBtn = document.getElementById('clear-all-btn');
+    
+    console.log('Setting up clear database event listeners...');
+    console.log('Clear Specific Button found:', clearSpecificBtn);
+    console.log('Clear All Button found:', clearAllBtn);
+    
+    if (clearSpecificBtn) {
+        clearSpecificBtn.addEventListener('click', handleClearSpecific);
+        console.log('Clear Specific event listener added');
+    } else {
+        console.error('Clear Specific button not found!');
+    }
+    
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', handleClearAll);
+        console.log('Clear All event listener added');
+    } else {
+        console.error('Clear All button not found!');
+    }
+}
+
+/**
+ * Show a message in the clear database section
+ * @param {string} message - Message to display
+ * @param {string} type - Message type (success, error, info, warning)
+ */
+function showClearMessage(message, type = 'info') {
+    // Create or update message element
+    let messageElement = document.getElementById('clear-message');
+    if (!messageElement) {
+        messageElement = document.createElement('div');
+        messageElement.id = 'clear-message';
+        messageElement.className = 'message';
+        
+        // Insert after the description in the clear database section
+        const clearSection = document.querySelector('.card h2 i.fa-trash-alt').parentNode.parentNode;
+        const description = clearSection.querySelector('.description');
+        if (description) {
+            description.parentNode.insertBefore(messageElement, description.nextSibling);
+        }
+    }
+    
+    messageElement.textContent = message;
+    messageElement.className = `message ${type}`;
+    messageElement.classList.remove('hidden');
+    
+    // Auto-hide success messages after 5 seconds
+    if (type === 'success') {
+        setTimeout(() => {
+            messageElement.classList.add('hidden');
+        }, 5000);
+    }
 }

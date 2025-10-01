@@ -43,56 +43,6 @@
                     </div>
                 </div>
 
-                <!-- Strategy Section -->
-                <div class="card">
-                    <h2>Execute Strategy</h2>
-                    <div class="form-group">
-                        <label for="strategy-address">Token Address</label>
-                        <input type="text" id="strategy-address" placeholder="Enter token address">
-                    </div>
-                    <div class="form-group">
-                        <label for="strategy-number">Strategy</label>
-                        <select id="strategy-number">
-                            <option value="1">Strategy 1 (Conservative)</option>
-                            <option value="2">Strategy 2 (Aggressive)</option>
-                            <option value="3">Strategy 3 (Market Cap Based)</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="order-type">Order Type</label>
-                        <select id="order-type">
-                            <option value="BUY">BUY</option>
-                            <option value="SELL">SELL</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Advanced Options</label>
-                        <div class="toggle-container">
-                            <input type="checkbox" id="advanced-toggle">
-                            <label for="advanced-toggle" class="toggle-label"></label>
-                            <span>Show Advanced Options</span>
-                        </div>
-                    </div>
-                    <div id="advanced-options" class="hidden">
-                        <div class="form-group">
-                            <label for="entry-price">Entry Price (optional)</label>
-                            <input type="number" id="entry-price" placeholder="Auto-calculated if empty">
-                        </div>
-                        <div class="form-group">
-                            <label for="take-profit">Take Profit (optional)</label>
-                            <input type="number" id="take-profit" placeholder="Auto-calculated if empty">
-                        </div>
-                        <div class="form-group">
-                            <label for="stop-loss">Stop Loss (optional)</label>
-                            <input type="number" id="stop-loss" placeholder="Auto-calculated if empty">
-                        </div>
-                    </div>
-                    <button id="strategy-btn" class="btn btn-primary">Execute Strategy</button>
-                    <div id="strategy-result" class="result-box hidden">
-                        <h3>Strategy Result</h3>
-                        <div id="strategy-details"></div>
-                    </div>
-                </div>
 
                 <!-- Bracket Strategy Section -->
                 <div class="card">
@@ -228,6 +178,49 @@
                         </table>
                     </div>
                     <div id="no-coins-message" class="message">No coins found in database.</div>
+                </div>
+
+                <!-- Clear Database Section -->
+                <div class="card">
+                    <h2><i class="fas fa-trash-alt"></i> Clear Database</h2>
+                    <p class="description">Remove coins and orders from the database. Use with caution!</p>
+                    
+                    <div class="form-group">
+                        <label for="clear-coin-select">Select Coin (optional)</label>
+                        <select id="clear-coin-select">
+                            <option value="">-- Select a coin to clear, or leave empty to clear all --</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Clear Options</label>
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="clear-option" value="orders-only" checked>
+                                <span class="radio-custom"></span>
+                                <span class="radio-text">Clear orders only (keep coin data)</span>
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="clear-option" value="coin-and-orders">
+                                <span class="radio-custom"></span>
+                                <span class="radio-text">Clear coin and all its orders</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="button-group">
+                        <button id="clear-specific-btn" class="btn btn-warning">
+                            <i class="fas fa-trash"></i> Clear Specific Coin
+                        </button>
+                        <button id="clear-all-btn" class="btn btn-danger">
+                            <i class="fas fa-trash-alt"></i> Clear All Data
+                        </button>
+                    </div>
+
+                    <div id="clear-result" class="result-box hidden">
+                        <h3>Clear Result</h3>
+                        <div id="clear-details"></div>
+                    </div>
                 </div>
             </div>
         </div>

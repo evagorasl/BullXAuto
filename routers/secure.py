@@ -706,24 +706,31 @@ async def get_current_market_cap(
 
 @router.post("/check-orders")
 async def check_orders(current_profile: Profile = Depends(get_current_profile)):
-    """Check all orders by navigating to automation page and extracting information"""
+    """Check all orders using enhanced processing with TP detection and renewal"""
     try:
-        # Import and use the background tasks function directly
-        from background_tasks import order_monitor
+        # Import and use the enhanced background tasks function directly
+        from background_tasks import check_orders_enhanced_for_profile
         
-        logger.info(f"API order check request for profile: {current_profile.name}")
+        logger.info(f"API enhanced order check request for profile: {current_profile.name}")
         
-        # Use the same function as background tasks
-        await order_monitor.check_orders(current_profile.name)
+        # Use the enhanced order processing function
+        result = await check_orders_enhanced_for_profile(current_profile.name)
         
-        return {
-            "success": True,
-            "message": f"Order check completed for {current_profile.name}",
-            "profile": current_profile.name
-        }
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Enhanced order check completed for {current_profile.name}",
+                "profile": current_profile.name,
+                "orders_checked": result.get("orders_checked", 0),
+                "orders_marked_for_renewal": result.get("orders_marked_for_renewal", 0),
+                "orders_replaced": result.get("orders_replaced", 0),
+                "summary": result.get("summary", "")
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Enhanced order check failed: {result.get('error')}")
             
     except Exception as e:
-        logger.error(f"Order check API error: {e}")
+        logger.error(f"Enhanced order check API error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def calculate_strategy_prices(strategy_number: int, market_cap: float, order_type: str) -> dict:

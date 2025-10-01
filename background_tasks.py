@@ -8,6 +8,7 @@ from chrome_driver import bullx_automator
 from typing import List, Dict, Optional, Any
 from models import Order
 from bracket_config import BRACKET_CONFIG, calculate_bracket
+from enhanced_order_processing import process_orders_enhanced
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ class OrderMonitor:
         job_id = f'order_checker_{profile_name}'
         if profile_name not in self.monitored_profiles:
             self.scheduler.add_job(
-                self.check_orders,
+                self.check_orders_enhanced,
                 trigger=IntervalTrigger(minutes=5),
                 args=[profile_name],
                 id=job_id,
@@ -105,6 +106,35 @@ class OrderMonitor:
                 
         except Exception as e:
             logger.error(f"Error in check_orders for profile {profile_name}: {e}")
+    
+    async def check_orders_enhanced(self, profile_name: str):
+        """Enhanced order checking with TP detection, renewal marking, and order replacement"""
+        try:
+            logger.info(f"Starting ENHANCED order check for profile: {profile_name}")
+            
+            # Use the enhanced order processing system
+            result = await process_orders_enhanced(profile_name)
+            
+            if result["success"]:
+                logger.info(f"✅ Enhanced order processing completed for {profile_name}")
+                logger.info(f"📊 Summary:")
+                logger.info(f"   Orders Checked: {result.get('orders_checked', 0)}")
+                logger.info(f"   Orders Marked for Renewal: {result.get('orders_marked_for_renewal', 0)}")
+                logger.info(f"   Orders Replaced: {result.get('orders_replaced', 0)}")
+                
+                # Print detailed summary
+                summary = result.get('summary', '')
+                if summary:
+                    logger.info(f"\n{summary}")
+                
+                return result
+            else:
+                logger.error(f"❌ Enhanced order processing failed for {profile_name}: {result.get('error')}")
+                return result
+                
+        except Exception as e:
+            logger.error(f"💥 Error in enhanced order check for profile {profile_name}: {e}")
+            return {"success": False, "error": str(e)}
     
     def _get_all_profiles(self) -> List[str]:
         """Get all profile names from database"""
@@ -679,3 +709,7 @@ async def stop_background_tasks_for_profile(profile_name: str):
 async def check_orders_for_profile(profile_name: str):
     """Manually trigger order check for a specific profile"""
     await order_monitor.check_orders(profile_name)
+
+async def check_orders_enhanced_for_profile(profile_name: str):
+    """Manually trigger enhanced order check for a specific profile"""
+    return await order_monitor.check_orders_enhanced(profile_name)

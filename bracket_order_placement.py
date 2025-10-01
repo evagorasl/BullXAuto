@@ -365,9 +365,7 @@ class BracketOrderPlacer:
                                     stop_loss_market_cap: float) -> bool:
         """
         Configure auto-sell strategy with take profit and stop loss.
-        
-        Note: The actual element selectors will need to be provided later
-        based on the BullX UI structure.
+        Handles both cases where strategy needs to be selected or is already selected.
         """
         try:
             # Open auto-sell frame
@@ -376,47 +374,59 @@ class BracketOrderPlacer:
             )
             auto_sell_button.click()
             
-            # Wait for auto-sell frame to open
+            # Wait for auto-sell frame to open - look for either Select or Disable buttons
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//button/span[contains(text(), 'Select')]"))
+                EC.any_of(
+                    EC.presence_of_element_located((By.XPATH, "//button/span[contains(text(), 'Select')]")),
+                    EC.presence_of_element_located((By.XPATH, "//button/span[contains(text(), 'Disable')]"))
+                )
             )
             time.sleep(2)
             
-            # Select strategy by name (e.g., "Bracket1_1")
+            # Find strategy by name (e.g., "Bracket1_1")
             strategies_names = driver.find_elements(By.XPATH, "//div[@class='flex flex-col gap-y-3 mt-4 pb-4']/div")
+            strategy_found = False
+            
             for strategy in strategies_names:
-                strategy_name_found = strategy.find_element(By.XPATH, "./div/div/span").text
-                if strategy_name_found == f"{strategy_name}":
-                    strategy_select = strategy.find_element(By.XPATH, "./div/div[2]/button[2]/span[contains(text(), 'Select')]")
-                    strategy_select.click()
-                    time.sleep(2)
-                    #strategy_selector = WebDriverWait(driver, 10).until(
-                    #    EC.element_to_be_clickable((By.XPATH, f"//option[text()='{strategy_name}'] | //button[text()='{strategy_name}']"))
-                    #)
-                    #strategy_selector.click()
-                    break
+                try:
+                    strategy_name_found = strategy.find_element(By.XPATH, "./div/div/span").text
+                    if strategy_name_found == f"{strategy_name}":
+                        strategy_found = True
+                        
+                        # Check if strategy is already selected (button says "Disable")
+                        try:
+                            disable_button = strategy.find_element(By.XPATH, "./div/div[2]/button[2]/span[contains(text(), 'Disable')]")
+                            logger.info(f"✅ Auto-sell strategy '{strategy_name}' is already selected")
+                            
+                            # Click the button to proceed with the already selected strategy
+                            proceed_button = WebDriverWait(driver, 10).until(
+                                EC.element_to_be_clickable((By.XPATH, "//*[@id='root']/div[1]/div[2]/main/div/div[2]/aside/div[2]/div[3]/div/div/div[1]/div/button"))
+                            )
+                            proceed_button.click()
+                            logger.info(f"✅ Clicked proceed button for already selected strategy")
+                            
+                        except NoSuchElementException:
+                            # Strategy is not selected, look for Select button
+                            try:
+                                select_button = strategy.find_element(By.XPATH, "./div/div[2]/button[2]/span[contains(text(), 'Select')]")
+                                select_button.click()
+                                logger.info(f"✅ Selected auto-sell strategy '{strategy_name}'")
+                                time.sleep(2)
+                                
+                            except NoSuchElementException:
+                                logger.error(f"❌ Neither 'Select' nor 'Disable' button found for strategy '{strategy_name}'")
+                                return False
+                        
+                        break
+                        
+                except Exception as e:
+                    logger.debug(f"Error checking strategy element: {e}")
+                    continue
             
-            """
-            # Configure take profit
-            tp_input = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[contains(@placeholder, 'take profit') or contains(@name, 'tp')]"))
-            )
-            tp_input.clear()
-            tp_input.send_keys(str(take_profit_market_cap))
+            if not strategy_found:
+                logger.error(f"❌ Strategy '{strategy_name}' not found in available strategies")
+                return False
             
-            # Configure stop loss
-            sl_input = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[contains(@placeholder, 'stop loss') or contains(@name, 'sl')]"))
-            )
-            sl_input.clear()
-            sl_input.send_keys(str(stop_loss_market_cap))
-            
-            # Confirm auto-sell configuration
-            confirm_auto_sell = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Confirm') or contains(text(), 'Apply')]"))
-            )
-            confirm_auto_sell.click()
-            """
             logger.info(f"Configured auto-sell strategy: {strategy_name}")
             logger.info(f"TP: ${take_profit_market_cap:,.0f}, SL: ${stop_loss_market_cap:,.0f}")
             

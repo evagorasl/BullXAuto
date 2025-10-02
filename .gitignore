@@ -153,6 +153,9 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# Console output log file
+console_output.txt
+
 # Database
 *.db
 bullx_auto.db

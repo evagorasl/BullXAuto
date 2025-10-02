@@ -6,17 +6,25 @@ import uvicorn
 import logging
 import os
 
-# Import our modules
+# Configure logging with timestamp and file output BEFORE importing any modules
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%d/%m/%Y-%H:%M:%S',
+    handlers=[
+        logging.FileHandler('console_output.txt', mode='a', encoding='utf-8'),
+        logging.StreamHandler()  # Keep console output as well
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Import our modules AFTER logging configuration
 from database import create_tables, init_profiles, db_manager
 from chrome_driver import chrome_driver_manager
 from background_task_monitor import enhanced_order_monitor
 from routers import secure_router, public_router
 from middleware import CloseDriverMiddleware
 from auto_monitoring_middleware import AutoMonitoringMiddleware
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

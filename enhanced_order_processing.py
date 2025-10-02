@@ -24,7 +24,7 @@ from bracket_order_placement import bracket_order_manager
 from models import Order, Coin
 from bracket_config import calculate_bracket, BRACKET_CONFIG
 
-logging.basicConfig(level=logging.INFO)
+# Get logger (configured at application level in main.py)
 logger = logging.getLogger(__name__)
 
 class EnhancedOrderProcessor:

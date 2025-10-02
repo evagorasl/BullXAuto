@@ -707,8 +707,8 @@ async def stop_background_tasks_for_profile(profile_name: str):
     await order_monitor.stop_monitoring_for_profile(profile_name)
 
 async def check_orders_for_profile(profile_name: str):
-    """Manually trigger order check for a specific profile"""
-    await order_monitor.check_orders(profile_name)
+    """Manually trigger enhanced order check for a specific profile"""
+    await order_monitor.check_orders_enhanced(profile_name)
 
 async def check_orders_enhanced_for_profile(profile_name: str):
     """Manually trigger enhanced order check for a specific profile"""

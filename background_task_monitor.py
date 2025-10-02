@@ -98,12 +98,12 @@ class EnhancedOrderMonitor:
             # Execute the actual order checking task
             logger.info(f"Starting enhanced order check for profile: {profile_name}")
             
-            # Use the background tasks order monitor directly
+            # Use the background tasks order monitor directly with enhanced processing
             from background_tasks import order_monitor
             
-            # Execute the order check using the same logic as background tasks
+            # Execute the ENHANCED order check using the same logic as background tasks
             await asyncio.wait_for(
-                order_monitor.check_orders(profile_name),
+                order_monitor.check_orders_enhanced(profile_name),
                 timeout=self.task_timeout
             )
             

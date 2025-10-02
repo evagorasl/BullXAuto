@@ -14,6 +14,8 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.keys import Keys
 import time
 import logging
+import os
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from bracket_config import (
     calculate_bracket, 
@@ -194,8 +196,12 @@ class BracketOrderPlacer:
             ):
                 return {"success": False, "error": "Failed to configure auto-sell strategy"}
             
+            # Get token name from database for screenshot
+            coin = db_manager.get_coin_by_address(address)
+            token_name = coin.name if coin and coin.name else "Unknown"
+            
             # Confirm the order
-            if not self._confirm_order(driver):
+            if not self._confirm_order(driver, token_name, bracket, bracket_id):
                 return {"success": False, "error": "Failed to confirm order"}
             
             # Save order to database
@@ -436,7 +442,57 @@ class BracketOrderPlacer:
             logger.error(f"Failed to configure auto-sell strategy: {e}")
             return False
     
-    def _confirm_order(self, driver) -> bool:
+    def _take_order_screenshot(self, driver, token_name: str, bracket: int, bracket_id: int) -> Optional[str]:
+        """
+        Take a screenshot when an order is placed successfully.
+        
+        Args:
+            driver: Selenium WebDriver instance
+            token_name: Name of the token
+            bracket: Market cap bracket (1-5)
+            bracket_id: Order ID within bracket (1-4)
+            
+        Returns:
+            Screenshot file path if successful, None otherwise
+        """
+        # SCREENSHOT FUNCTIONALITY - Comment out the next line to disable screenshots
+        ENABLE_SCREENSHOTS = True
+        
+        if not ENABLE_SCREENSHOTS:
+            return None
+            
+        try:
+            # Create screenshots directory if it doesn't exist
+            screenshots_dir = "order_placement_screenshots"
+            if not os.path.exists(screenshots_dir):
+                os.makedirs(screenshots_dir)
+                logger.info(f"Created screenshots directory: {screenshots_dir}")
+            
+            # Generate timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Clean token name for filename (remove special characters)
+            clean_token_name = "".join(c for c in token_name if c.isalnum() or c in ('-', '_')).rstrip()
+            if not clean_token_name:
+                clean_token_name = "Unknown"
+            
+            # Create filename with timestamp, token name, bracket, and bracket_id
+            filename = f"{timestamp}_{clean_token_name}_B{bracket}_S{bracket_id}.png"
+            filepath = os.path.join(screenshots_dir, filename)
+            
+            # Take screenshot
+            driver.save_screenshot(filepath)
+            
+            logger.info(f"📸 Screenshot saved: {filename}")
+            logger.info(f"   Token: {token_name}, Bracket: {bracket}, Sub ID: {bracket_id}")
+            
+            return filepath
+            
+        except Exception as e:
+            logger.error(f"Failed to take screenshot: {e}")
+            return None
+    
+    def _confirm_order(self, driver, token_name: str = "Unknown", bracket: int = 0, bracket_id: int = 0) -> bool:
         """Confirm and place the order"""
         try:
             # Look for final confirm/place order button
@@ -451,8 +507,15 @@ class BracketOrderPlacer:
                     EC.presence_of_element_located((By.XPATH, "//div[contains(text(), 'success') or contains(text(), 'placed') or contains(@class, 'success')]"))
                 )
                 logger.info("Order placed successfully")
+                
+                # Take screenshot when order is placed successfully
+                self._take_order_screenshot(driver, token_name, bracket, bracket_id)
+                
             except TimeoutException:
                 logger.warning("Order confirmation message not found, but order may have been placed")
+                
+                # Still take screenshot even if confirmation message not found
+                self._take_order_screenshot(driver, token_name, bracket, bracket_id)
             
             return True
             
@@ -461,7 +524,8 @@ class BracketOrderPlacer:
             return False
     
     def replace_bracket_order(self, profile_name: str, address: str, bracket_id: int,
-                            new_amount: float, strategy_number: int = 1) -> Dict:
+                            new_amount: float, strategy_number: int = 1, 
+                            original_bracket: int = None) -> Dict:
         """
         Replace a specific bracket order with a new one.
         
@@ -471,17 +535,25 @@ class BracketOrderPlacer:
             bracket_id: Bracket ID to replace (1-4)
             new_amount: New order amount
             strategy_number: Strategy number
+            original_bracket: Original bracket to use (preserves bracket consistency)
             
         Returns:
             Dict with success status and order details
         """
         try:
-            # Get current market cap and bracket info
+            # Get current market cap for order placement logic
             if not self.automator.search_address(profile_name, address):
                 return {"success": False, "error": "Failed to search address"}
             
             current_market_cap = self.automator.get_market_cap(profile_name)
-            bracket = calculate_bracket(current_market_cap)
+            
+            # Use original bracket if provided, otherwise calculate from current market cap
+            if original_bracket and original_bracket in BRACKET_CONFIG:
+                bracket = original_bracket
+                logger.info(f"Using original bracket {bracket} for replacement order (preserving bracket consistency)")
+            else:
+                bracket = calculate_bracket(current_market_cap)
+                logger.info(f"Calculated bracket {bracket} from current market cap ${current_market_cap:,.0f}")
             
             # Get bracket configuration for the specific bracket_id
             bracket_config = BRACKET_CONFIG[bracket]
@@ -539,7 +611,8 @@ class BracketOrderManager:
         )
     
     def replace_order(self, profile_name: str, address: str, bracket_id: int,
-                     new_amount: float, strategy_number: int = 1) -> Dict:
+                     new_amount: float, strategy_number: int = 1, 
+                     original_bracket: int = None) -> Dict:
         """
         Replace a specific bracket order.
         """
@@ -548,7 +621,8 @@ class BracketOrderManager:
             address=address,
             bracket_id=bracket_id,
             new_amount=new_amount,
-            strategy_number=strategy_number
+            strategy_number=strategy_number,
+            original_bracket=original_bracket
         )
     
     def get_bracket_preview(self, address: str, total_amount: float, 

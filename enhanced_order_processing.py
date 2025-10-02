@@ -200,7 +200,7 @@ class EnhancedOrderProcessor:
             return {"success": False, "error": str(e)}
     
     async def _process_coin_orders(self, profile_name: str, token: str, coin_orders: List[Dict]):
-        """Process all orders for a specific coin, including missing order identification"""
+        """Process all orders for a specific coin, including missing order identification and processing"""
         try:
             logger.info(f"\n🪙 Processing {len(coin_orders)} orders for {token}:")
             
@@ -211,8 +211,9 @@ class EnhancedOrderProcessor:
                 return
             
             # Check if we have less than 4 orders and identify missing ones
+            missing_orders = []
             if len(coin_orders) < 4:
-                await self._identify_missing_orders(coin, coin_orders, profile_name)
+                missing_orders = await self._identify_missing_orders(coin, coin_orders, profile_name)
             
             # Process TP conditions and prepare for deletion
             tp_orders = []
@@ -232,7 +233,12 @@ class EnhancedOrderProcessor:
                     else:
                         logger.warning(f"    ❌ Could not identify order in database for renewal")
             
-            # Batch delete BullX entries for this coin
+            # Process missing orders (mark for renewal without BullX deletion)
+            if missing_orders:
+                logger.info(f"  🔄 Processing {len(missing_orders)} missing orders for renewal...")
+                await self._process_missing_orders(profile_name, missing_orders)
+            
+            # Batch delete BullX entries for TP orders only
             if tp_orders:
                 logger.info(f"  🗑️  Batch deleting {len(tp_orders)} BullX entries for {token}...")
                 await self._batch_delete_bullx_entries(profile_name, tp_orders)
@@ -240,15 +246,20 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"💥 Error processing coin orders for {token}: {e}")
     
-    async def _identify_missing_orders(self, coin: Coin, coin_orders: List[Dict], profile_name: str):
-        """Identify which bracket orders are missing for a coin"""
+    async def _identify_missing_orders(self, coin: Coin, coin_orders: List[Dict], profile_name: str) -> List[Dict]:
+        """
+        Identify which bracket orders are missing for a coin and return missing order data.
+        
+        Returns:
+            List of missing order dictionaries with order info for renewal
+        """
         try:
             logger.info(f"  📊 Analyzing missing orders for {coin.name or coin.address} ({len(coin_orders)}/4 orders found):")
             
             # Get bracket configuration
             if not coin.bracket or coin.bracket not in BRACKET_CONFIG:
                 logger.warning(f"    ❌ No valid bracket found for coin")
-                return
+                return []
             
             bracket_config = BRACKET_CONFIG[coin.bracket]
             bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
@@ -257,24 +268,106 @@ class EnhancedOrderProcessor:
             db_orders = db_manager.get_orders_by_coin(coin.id)
             active_db_orders = [o for o in db_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
             
+            # Find which bracket IDs are present in BullX (from parsed orders)
+            bullx_bracket_ids = set()
+            for order_info in coin_orders:
+                parsed_data = order_info.get('parsed_data', {})
+                # Try to identify bracket_id from parsed data
+                order_match = self._identify_order(parsed_data, profile_name)
+                if order_match and order_match.get('sub_id'):
+                    bullx_bracket_ids.add(order_match['sub_id'])
+            
             # Find which bracket IDs are present in database
-            present_bracket_ids = {order.bracket_id for order in active_db_orders}
-            all_bracket_ids = {1, 2, 3, 4}
-            missing_bracket_ids = all_bracket_ids - present_bracket_ids
+            db_bracket_ids = {order.bracket_id for order in active_db_orders}
+            
+            # Find orders that are in database but missing from BullX
+            missing_bracket_ids = db_bracket_ids - bullx_bracket_ids
+            
+            missing_orders = []
             
             if missing_bracket_ids:
-                logger.info(f"    📋 Database shows missing bracket IDs: {sorted(missing_bracket_ids)}")
-                for bracket_id in sorted(missing_bracket_ids):
-                    entry_price = bracket_entries[bracket_id - 1]  # Convert to 0-based index
-                    logger.info(f"      - Bracket ID {bracket_id}: Entry ${entry_price:,.0f}")
+                logger.info(f"    🚨 MISSING ORDERS DETECTED!")
+                logger.info(f"    📋 Database has bracket IDs: {sorted(db_bracket_ids)}")
+                logger.info(f"    📋 BullX shows bracket IDs: {sorted(bullx_bracket_ids)}")
+                logger.info(f"    ❌ Missing bracket IDs: {sorted(missing_bracket_ids)}")
+                
+                # Find the actual database orders that are missing
+                for bracket_id in missing_bracket_ids:
+                    missing_db_order = None
+                    for db_order in active_db_orders:
+                        if db_order.bracket_id == bracket_id:
+                            missing_db_order = db_order
+                            break
+                    
+                    if missing_db_order:
+                        entry_price = bracket_entries[bracket_id - 1]  # Convert to 0-based index
+                        logger.info(f"      🔍 Missing Bracket ID {bracket_id}: Entry ${entry_price:,.0f} (Order ID: {missing_db_order.id})")
+                        
+                        # Create missing order info for renewal processing
+                        missing_order_info = {
+                            'order': missing_db_order,
+                            'coin': coin,
+                            'bracket_id': bracket_id,
+                            'is_missing': True,
+                            'reason': 'Order present in database but missing from BullX'
+                        }
+                        missing_orders.append(missing_order_info)
+                        
             else:
-                logger.info(f"    ✅ All 4 bracket orders present in database")
+                logger.info(f"    ✅ All database orders found on BullX")
             
             # Compare with BullX orders
-            logger.info(f"    📋 BullX shows {len(coin_orders)} orders for this coin")
+            logger.info(f"    📋 BullX shows {len(coin_orders)} orders, Database has {len(active_db_orders)} active orders")
+            
+            return missing_orders
             
         except Exception as e:
             logger.error(f"Error identifying missing orders: {e}")
+            return []
+    
+    async def _process_missing_orders(self, profile_name: str, missing_orders: List[Dict]):
+        """Process missing orders by marking them for renewal without BullX deletion"""
+        try:
+            logger.info(f"    🔄 Processing {len(missing_orders)} missing orders...")
+            
+            for missing_order_info in missing_orders:
+                order = missing_order_info['order']
+                coin = missing_order_info['coin']
+                bracket_id = missing_order_info['bracket_id']
+                reason = missing_order_info['reason']
+                
+                logger.info(f"      📝 Processing missing order ID {order.id} (Bracket Sub ID {bracket_id})")
+                logger.info(f"         Reason: {reason}")
+                
+                # Update database status to COMPLETED (since it's missing from BullX)
+                db_update_success = db_manager.update_order_status(order.id, "COMPLETED")
+                
+                if db_update_success:
+                    logger.info(f"      ✅ Updated missing order {order.id} status to COMPLETED")
+                    
+                    # Add to renewal list (using original bracket from the order's coin)
+                    renewal_info = {
+                        'order_id': order.id,
+                        'coin_address': coin.address,
+                        'coin_name': coin.name,
+                        'parsed_data': {'token': coin.name or 'Unknown', 'reason': reason},
+                        'button_index': 0,  # Not applicable for missing orders
+                        'row_index': 0,     # Not applicable for missing orders
+                        'original_bracket': coin.bracket,  # Use original bracket from coin
+                        'bracket_sub_id': bracket_id,
+                        'profile_name': order.profile_name,
+                        'amount': order.amount or 1.0,
+                        'is_missing_order': True
+                    }
+                    
+                    self.orders_for_renewal.append(renewal_info)
+                    logger.info(f"      ✅ Missing order {order.id} marked for renewal")
+                    
+                else:
+                    logger.error(f"      ❌ Failed to update missing order {order.id} status")
+                    
+        except Exception as e:
+            logger.error(f"💥 Error processing missing orders: {e}")
     
     async def _batch_delete_bullx_entries(self, profile_name: str, tp_orders: List[Dict]):
         """Batch delete BullX entries for TP orders of a specific coin"""
@@ -428,19 +521,75 @@ class EnhancedOrderProcessor:
         """
         return trigger_condition.strip() == "1 SL"
     
+    def _parse_trigger_condition_entry_price(self, trigger_condition: str) -> Optional[float]:
+        """
+        Parse trigger condition to extract entry price.
+        
+        Examples:
+        - "Buy below $231K" -> 231000.0
+        - "Buy below $93.1K" -> 93100.0
+        - "Buy below $1.5M" -> 1500000.0
+        - "1 SL" -> None (TP condition)
+        
+        Returns:
+            Entry price as float, or None if not parseable
+        """
+        try:
+            import re
+            
+            if not trigger_condition or trigger_condition.strip() == "1 SL":
+                return None
+            
+            # Look for pattern like "Buy below $XXX.XK" or "Buy below $XXXM"
+            pattern = r'Buy below \$([0-9]+(?:\.[0-9]+)?)(K|k|M|m|B|b)?'
+            match = re.search(pattern, trigger_condition)
+            
+            if not match:
+                logger.debug(f"Could not parse trigger condition: '{trigger_condition}'")
+                return None
+            
+            number_str = match.group(1)
+            suffix = match.group(2)
+            
+            try:
+                number = float(number_str)
+                
+                if suffix:
+                    suffix_lower = suffix.lower()
+                    if suffix_lower == 'k':
+                        number *= 1000
+                    elif suffix_lower == 'm':
+                        number *= 1000000
+                    elif suffix_lower == 'b':
+                        number *= 1000000000
+                
+                logger.debug(f"Parsed trigger condition '{trigger_condition}' -> ${number:,.0f}")
+                return number
+                
+            except ValueError:
+                logger.debug(f"Could not convert number '{number_str}' to float")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error parsing trigger condition '{trigger_condition}': {e}")
+            return None
+    
     def _identify_order(self, parsed_data: Dict[str, Any], profile_name: str) -> Optional[Dict[str, Any]]:
         """Identify which database order corresponds to this row"""
         try:
             token = parsed_data.get('token', '')
-            entry_price = parsed_data.get('entry_price')
+            trigger_condition = parsed_data.get('trigger_condition', '')
             
             if not token:
+                logger.debug(f"No token found in parsed data")
                 return None
+            
+            logger.debug(f"🔍 Identifying order for token: {token}, trigger: {trigger_condition}")
             
             # Find coin by token name
             coin = self._find_coin_by_token(token)
             if not coin:
-                logger.warning(f"Could not find coin for token: {token}")
+                logger.debug(f"Could not find coin for token: {token}")
                 return None
             
             # Use stored bracket from coin, or calculate from market_cap if not available
@@ -468,27 +617,47 @@ class EnhancedOrderProcessor:
             bracket_config = BRACKET_CONFIG[stored_bracket]
             bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
             
+            logger.debug(f"Using bracket {stored_bracket} with entries: {bracket_entries}")
+            
+            # Try to extract entry price from trigger condition
+            entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+            
             # Match entry price to sub_id (1-4) if we have entry price
             sub_id = None
             if entry_price:
                 sub_id = self._match_entry_to_sub_id(entry_price, bracket_entries)
+                logger.debug(f"Matched entry price ${entry_price:,.0f} to sub_id: {sub_id}")
+            else:
+                logger.debug(f"Could not extract entry price from trigger condition: '{trigger_condition}'")
             
-            # If we couldn't match by entry price, try to find by other means
+            # If we couldn't match by entry price, try fallback methods
             if not sub_id:
-                # For fulfilled orders, we might need to check existing orders
-                if parsed_data.get('order_status') == 'FULFILLED':
+                logger.debug(f"No sub_id found by entry price matching, trying fallback methods...")
+                
+                # For TP conditions (fulfilled orders), try to find by other means
+                if self._is_tp_condition(trigger_condition):
+                    logger.debug(f"TP condition detected, trying to find fulfilled order")
                     sub_id = self._find_fulfilled_order_sub_id(coin.id, profile_name, parsed_data)
                 else:
-                    # For orders without entry price, try to match any ACTIVE order
+                    # For active orders without identifiable entry price, try sequential matching
+                    logger.debug(f"Trying sequential matching for active orders")
                     all_orders = db_manager.get_orders_by_coin(coin.id)
                     matching_orders = [o for o in all_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
+                    
                     if matching_orders:
-                        # Return the first matching order as a fallback
+                        # Sort by bracket_id to ensure consistent matching
+                        matching_orders.sort(key=lambda x: x.bracket_id)
+                        
+                        # For now, return the first matching order as a fallback
+                        # This is not ideal but better than no match
+                        first_order = matching_orders[0]
+                        logger.debug(f"Fallback: Using first active order with bracket_id {first_order.bracket_id}")
+                        
                         return {
-                            'order': matching_orders[0],
+                            'order': first_order,
                             'coin': coin,
                             'bracket': stored_bracket,
-                            'sub_id': matching_orders[0].bracket_id,
+                            'sub_id': first_order.bracket_id,
                             'entry_price': entry_price,
                             'bracket_entries': bracket_entries
                         }
@@ -497,6 +666,10 @@ class EnhancedOrderProcessor:
             order = None
             if sub_id:
                 order = self._get_order_by_coin_sub_id(coin.id, sub_id, profile_name)
+                if order:
+                    logger.debug(f"✅ Found matching order: ID {order.id}, bracket_id {sub_id}")
+                else:
+                    logger.debug(f"❌ No order found for sub_id {sub_id}")
             
             return {
                 'order': order,
@@ -765,9 +938,9 @@ class EnhancedOrderProcessor:
                                 'amount': amount
                             })
                             
-                            # Create new order using bracket_order_placement
+                            # Create new order using bracket_order_placement with original bracket
                             new_order_result = await self._create_replacement_order(
-                                profile_name, coin_address, bracket_sub_id, amount
+                                profile_name, coin_address, bracket_sub_id, amount, original_bracket
                             )
                             
                             if new_order_result["success"]:
@@ -795,18 +968,22 @@ class EnhancedOrderProcessor:
             return {"orders_replaced": 0, "renewal_details": [], "error": str(e)}
     
     async def _create_replacement_order(self, profile_name: str, coin_address: str, 
-                                      bracket_sub_id: int, amount: float) -> Dict:
-        """Create a replacement order using bracket_order_placement"""
+                                      bracket_sub_id: int, amount: float, 
+                                      original_bracket: int = None) -> Dict:
+        """Create a replacement order using bracket_order_placement with original bracket preservation"""
         try:
             logger.info(f"      🔨 Creating replacement order for bracket sub ID {bracket_sub_id}...")
+            if original_bracket:
+                logger.info(f"         Using original bracket {original_bracket} (preserving bracket consistency)")
             
-            # Use bracket_order_manager to replace the specific order
+            # Use bracket_order_manager to replace the specific order with original bracket
             result = bracket_order_manager.replace_order(
                 profile_name=profile_name,
                 address=coin_address,
                 bracket_id=bracket_sub_id,
                 new_amount=amount,
-                strategy_number=1  # Default strategy number
+                strategy_number=1,  # Default strategy number
+                original_bracket=original_bracket  # Pass original bracket to preserve consistency
             )
             
             if result["success"]:

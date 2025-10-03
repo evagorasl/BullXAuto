@@ -91,12 +91,52 @@ class DatabaseManager:
             db.close()
     
     def update_order_status(self, order_id: int, status: str) -> bool:
-        """Update order status"""
+        """Update order status with proper timestamp handling"""
         db = self.SessionLocal()
         try:
             order = db.query(Order).filter(Order.id == order_id).first()
             if order:
                 order.status = status
+                order.updated_at = datetime.now()
+                
+                # Set completed_at when marking as COMPLETED
+                if status == "COMPLETED":
+                    order.completed_at = datetime.now()
+                
+                db.commit()
+                return True
+            return False
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+    
+    def update_order_trigger_condition(self, order_id: int, trigger_condition: str) -> bool:
+        """Update order trigger condition with timestamp"""
+        db = self.SessionLocal()
+        try:
+            order = db.query(Order).filter(Order.id == order_id).first()
+            if order:
+                order.trigger_condition = trigger_condition
+                order.updated_at = datetime.now()
+                db.commit()
+                return True
+            return False
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+    
+    def update_order_with_bullx_refresh(self, order_id: int, trigger_condition: str, bullx_update_time: datetime) -> bool:
+        """Update order with BullX automation refresh - sets trigger condition and calculated BullX update time"""
+        db = self.SessionLocal()
+        try:
+            order = db.query(Order).filter(Order.id == order_id).first()
+            if order:
+                order.trigger_condition = trigger_condition
+                order.updated_at = bullx_update_time  # Use calculated BullX update time
                 db.commit()
                 return True
             return False
@@ -265,12 +305,13 @@ class DatabaseManager:
             db.close()
     
     def complete_order(self, order_id: int, status: str = "COMPLETED") -> bool:
-        """Mark an order as completed or stopped"""
+        """Mark an order as completed or stopped with proper timestamp handling"""
         db = self.SessionLocal()
         try:
             order = db.query(Order).filter(Order.id == order_id).first()
             if order:
                 order.status = status
+                order.updated_at = datetime.now()
                 order.completed_at = datetime.now()
                 db.commit()
                 return True

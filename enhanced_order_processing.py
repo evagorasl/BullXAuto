@@ -219,7 +219,7 @@ class EnhancedOrderProcessor:
             tp_orders = []
             for order_info in coin_orders:
                 if order_info['is_tp']:
-                    logger.info(f"  🎯 TP DETECTED in row {order_info['row_index']}!")
+                    logger.info(f" 🎯 TP DETECTED in row {order_info['row_index']}!")
                     
                     # Identify the order in database
                     order_match = self._identify_order(order_info['parsed_data'], profile_name)
@@ -231,7 +231,7 @@ class EnhancedOrderProcessor:
                             'coin': coin
                         })
                     else:
-                        logger.warning(f"    ❌ Could not identify order in database for renewal")
+                        logger.warning(f" ❌ Could not identify order in database for renewal")
             
             # Process missing orders (mark for renewal without BullX deletion)
             if missing_orders:
@@ -575,22 +575,28 @@ class EnhancedOrderProcessor:
             return None
     
     def _identify_order(self, parsed_data: Dict[str, Any], profile_name: str) -> Optional[Dict[str, Any]]:
-        """Identify which database order corresponds to this row"""
+        """Enhanced order identification with trigger condition storage and expiry time matching"""
         try:
             token = parsed_data.get('token', '')
             trigger_condition = parsed_data.get('trigger_condition', '')
+            expiry = parsed_data.get('expiry', '')
             
             if not token:
                 logger.debug(f"No token found in parsed data")
                 return None
             
-            logger.debug(f"🔍 Identifying order for token: {token}, trigger: {trigger_condition}")
+            logger.info(f"🔍 IDENTIFYING ORDER:")
+            logger.info(f"   Token: {token}")
+            logger.info(f"   Trigger: {trigger_condition}")
+            logger.info(f"   Expiry: {expiry}")
             
             # Find coin by token name
             coin = self._find_coin_by_token(token)
             if not coin:
-                logger.debug(f"Could not find coin for token: {token}")
+                logger.info(f"   ❌ Could not find coin for token: {token}")
                 return None
+            
+            logger.info(f"   ✅ Found coin: {coin.name or coin.address} (ID: {coin.id})")
             
             # Use stored bracket from coin, or calculate from market_cap if not available
             stored_bracket = coin.bracket
@@ -604,84 +610,146 @@ class EnhancedOrderProcessor:
                         address=coin.address,
                         data={"bracket": stored_bracket}
                     )
-                    logger.info(f"Calculated and stored bracket {stored_bracket} for coin {coin.name or coin.address} based on market_cap ${coin.market_cap:,.0f}")
+                    logger.info(f"   📊 Calculated and stored bracket {stored_bracket} based on market_cap ${coin.market_cap:,.0f}")
                 else:
-                    logger.warning(f"No bracket or market_cap stored for coin {coin.name or coin.address}")
+                    logger.warning(f"   ❌ No bracket or market_cap stored for coin")
                     return None
             
             # Get bracket configuration entries for stored bracket
             if stored_bracket not in BRACKET_CONFIG:
-                logger.error(f"Invalid bracket {stored_bracket} for coin {coin.name or coin.address}")
+                logger.error(f"   ❌ Invalid bracket {stored_bracket} for coin")
                 return None
             
             bracket_config = BRACKET_CONFIG[stored_bracket]
             bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
             
-            logger.debug(f"Using bracket {stored_bracket} with entries: {bracket_entries}")
+            logger.info(f"   📊 Using bracket {stored_bracket} with entries: {bracket_entries}")
             
-            # Try to extract entry price from trigger condition
-            entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+            # Get all active orders for this coin and profile
+            all_orders = db_manager.get_orders_by_coin(coin.id)
+            active_orders = [o for o in all_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
             
-            # Match entry price to sub_id (1-4) if we have entry price
+            logger.info(f"   📋 Found {len(active_orders)} active orders in database")
+            
+            # Method 1: Try to match by trigger condition (exact match)
             sub_id = None
-            if entry_price:
-                sub_id = self._match_entry_to_sub_id(entry_price, bracket_entries)
-                logger.debug(f"Matched entry price ${entry_price:,.0f} to sub_id: {sub_id}")
-            else:
-                logger.debug(f"Could not extract entry price from trigger condition: '{trigger_condition}'")
+            matched_order = None
+            identification_method = None
             
-            # If we couldn't match by entry price, try fallback methods
+            logger.info(f"   🎯 METHOD 1: Trigger condition matching...")
+            for order in active_orders:
+                if order.trigger_condition == trigger_condition:
+                    sub_id = order.bracket_id
+                    matched_order = order
+                    identification_method = "trigger_condition_exact"
+                    logger.info(f"      ✅ Exact trigger match found: Order ID {order.id}, Bracket ID {sub_id}")
+                    break
+            
+            # Method 2: Try to match by entry price from trigger condition
             if not sub_id:
-                logger.debug(f"No sub_id found by entry price matching, trying fallback methods...")
-                
-                # For TP conditions (fulfilled orders), try to find by other means
-                if self._is_tp_condition(trigger_condition):
-                    logger.debug(f"TP condition detected, trying to find fulfilled order")
-                    sub_id = self._find_fulfilled_order_sub_id(coin.id, profile_name, parsed_data)
+                logger.info(f"   🎯 METHOD 2: Entry price matching...")
+                entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+                if entry_price:
+                    logger.info(f"      📊 Extracted entry price: ${entry_price:,.0f}")
+                    sub_id = self._match_entry_to_sub_id(entry_price, bracket_entries)
+                    if sub_id:
+                        matched_order = self._get_order_by_coin_sub_id(coin.id, sub_id, profile_name)
+                        if matched_order:
+                            identification_method = "entry_price"
+                            logger.info(f"      ✅ Entry price match found: Order ID {matched_order.id}, Bracket ID {sub_id}")
+                        else:
+                            logger.info(f"      ❌ No order found for calculated sub_id {sub_id}")
+                            sub_id = None
+                    else:
+                        logger.info(f"      ❌ Could not match entry price to bracket entries")
                 else:
-                    # For active orders without identifiable entry price, try sequential matching
-                    logger.debug(f"Trying sequential matching for active orders")
-                    all_orders = db_manager.get_orders_by_coin(coin.id)
-                    matching_orders = [o for o in all_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
-                    
-                    if matching_orders:
-                        # Sort by bracket_id to ensure consistent matching
-                        matching_orders.sort(key=lambda x: x.bracket_id)
-                        
-                        # For now, return the first matching order as a fallback
-                        # This is not ideal but better than no match
-                        first_order = matching_orders[0]
-                        logger.debug(f"Fallback: Using first active order with bracket_id {first_order.bracket_id}")
-                        
-                        return {
-                            'order': first_order,
-                            'coin': coin,
-                            'bracket': stored_bracket,
-                            'sub_id': first_order.bracket_id,
-                            'entry_price': entry_price,
-                            'bracket_entries': bracket_entries
-                        }
+                    logger.info(f"      ❌ Could not extract entry price from trigger condition")
             
-            # Find order in database if we have sub_id
-            order = None
-            if sub_id:
-                order = self._get_order_by_coin_sub_id(coin.id, sub_id, profile_name)
-                if order:
-                    logger.debug(f"✅ Found matching order: ID {order.id}, bracket_id {sub_id}")
+            # Method 3: Try to match by expiry time (for cases where multiple orders exist)
+            if not sub_id and len(active_orders) > 1:
+                logger.info(f"   🎯 METHOD 3: Expiry time matching...")
+                expiry_seconds = self._parse_expiry_to_seconds(expiry)
+                if expiry_seconds is not None:
+                    logger.info(f"      ⏰ Parsed expiry: {expiry_seconds} seconds")
+                    best_match = self._match_by_expiry_time(active_orders, expiry_seconds, trigger_condition)
+                    if best_match:
+                        sub_id = best_match.bracket_id
+                        matched_order = best_match
+                        identification_method = "expiry_time"
+                        logger.info(f"      ✅ Expiry time match found: Order ID {best_match.id}, Bracket ID {sub_id}")
                 else:
-                    logger.debug(f"❌ No order found for sub_id {sub_id}")
+                    logger.info(f"      ❌ Could not parse expiry time: '{expiry}'")
+            
+            # Method 4: TP condition handling
+            if not sub_id and self._is_tp_condition(trigger_condition):
+                logger.info(f"   🎯 METHOD 4: TP condition handling...")
+                # For TP conditions, try to find any active order and mark it
+                if active_orders:
+                    matched_order = active_orders[0]  # Take first available
+                    sub_id = matched_order.bracket_id
+                    identification_method = "tp_fallback"
+                    logger.info(f"      ✅ TP fallback match: Order ID {matched_order.id}, Bracket ID {sub_id}")
+            
+            # Method 5: Sequential fallback (last resort)
+            if not sub_id and active_orders:
+                logger.info(f"   🎯 METHOD 5: Sequential fallback...")
+                active_orders.sort(key=lambda x: x.bracket_id)
+                matched_order = active_orders[0]
+                sub_id = matched_order.bracket_id
+                identification_method = "sequential_fallback"
+                logger.info(f"      ⚠️  Sequential fallback: Order ID {matched_order.id}, Bracket ID {sub_id}")
+            
+            # Update trigger condition in database if we found a match AND it's different
+            if matched_order and trigger_condition:
+                if matched_order.trigger_condition != trigger_condition:
+                    # Check if this is a BullX automation refresh (entry → TP/SL transition)
+                    is_bullx_refresh = self._is_bullx_automation_refresh(
+                        matched_order.trigger_condition, trigger_condition
+                    )
+                    
+                    if is_bullx_refresh:
+                        # Calculate when BullX updated the order using expiry time
+                        bullx_update_time = self._calculate_bullx_update_time(expiry)
+                        if bullx_update_time:
+                            self._update_order_with_bullx_refresh(
+                                matched_order.id, trigger_condition, bullx_update_time
+                            )
+                            logger.info(f"🔄 BullX automation refresh detected for order {matched_order.id}:")
+                            logger.info(f"   Trigger: '{matched_order.trigger_condition}' → '{trigger_condition}'")
+                            logger.info(f"   Calculated BullX update time: {bullx_update_time}")
+                        else:
+                            # Fallback to regular update if calculation fails
+                            self._update_order_trigger_condition(matched_order.id, trigger_condition)
+                            logger.warning(f"Could not calculate BullX update time, using regular update for order {matched_order.id}")
+                    else:
+                        # Regular trigger condition update
+                        self._update_order_trigger_condition(matched_order.id, trigger_condition)
+                        logger.debug(f"Updated trigger condition for order {matched_order.id}: '{matched_order.trigger_condition}' -> '{trigger_condition}'")
+                else:
+                    logger.debug(f"Trigger condition unchanged for order {matched_order.id}: '{trigger_condition}'")
+            
+            # Final result
+            if sub_id and matched_order:
+                logger.info(f"   ✅ IDENTIFICATION SUCCESSFUL:")
+                logger.info(f"      Method: {identification_method}")
+                logger.info(f"      Order ID: {matched_order.id}")
+                logger.info(f"      Bracket ID: {sub_id}")
+                logger.info(f"      Trigger: {trigger_condition}")
+            else:
+                logger.info(f"   ❌ IDENTIFICATION FAILED: No matching order found")
             
             return {
-                'order': order,
+                'order': matched_order,
                 'coin': coin,
-                'bracket': stored_bracket,  # Coin's bracket
-                'sub_id': sub_id,          # Order's sub ID within the bracket
-                'entry_price': entry_price,
-                'bracket_entries': bracket_entries
+                'bracket': stored_bracket,
+                'sub_id': sub_id,
+                'entry_price': self._parse_trigger_condition_entry_price(trigger_condition),
+                'bracket_entries': bracket_entries,
+                'identification_method': identification_method
             }
             
         except Exception as e:
-            logger.error(f"Error identifying order: {e}")
+            logger.error(f"💥 Error identifying order: {e}")
             return None
     
     def _find_coin_by_token(self, token: str) -> Optional[Coin]:
@@ -750,6 +818,234 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"Error getting order by coin/sub_id: {e}")
             return None
+    
+    def _parse_expiry_to_seconds(self, expiry: str) -> Optional[int]:
+        """
+        Parse expiry time string to total seconds.
+        
+        Examples:
+        - "63h 09m 52s" -> 227392 seconds
+        - "56h 42m 17s" -> 204137 seconds
+        - "33h 52m 13s" -> 121933 seconds
+        - "00h 00m 00s" -> 0 seconds (expired)
+        
+        Returns:
+            Total seconds as int, or None if not parseable
+        """
+        try:
+            import re
+            
+            if not expiry:
+                return None
+            
+            # Pattern to match "XXh XXm XXs" format
+            pattern = r'(\d+)h\s+(\d+)m\s+(\d+)s'
+            match = re.search(pattern, expiry)
+            
+            if not match:
+                logger.debug(f"Could not parse expiry format: '{expiry}'")
+                return None
+            
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            seconds = int(match.group(3))
+            
+            total_seconds = hours * 3600 + minutes * 60 + seconds
+            
+            logger.debug(f"Parsed expiry '{expiry}' -> {total_seconds} seconds")
+            return total_seconds
+            
+        except Exception as e:
+            logger.error(f"Error parsing expiry '{expiry}': {e}")
+            return None
+    
+    def _match_by_expiry_time(self, active_orders: List[Order], expiry_seconds: int, trigger_condition: str = "") -> Optional[Order]:
+        """
+        Match order by comparing expiry time with order timestamp.
+        
+        For TP conditions ("1 TP, 1 SL"), uses updated_at since BullX updates expiry when order is entered.
+        For entry conditions ("Buy below $XXX"), uses created_at since order hasn't been entered yet.
+        
+        Logic: current_time - reference_time ≈ total_order_duration - expiry_seconds
+        Where total_order_duration is typically 72 hours (259200 seconds) for limit orders.
+        
+        Args:
+            active_orders: List of active orders for the coin
+            expiry_seconds: Remaining seconds from BullX
+            trigger_condition: The trigger condition to determine which timestamp to use
+            
+        Returns:
+            Best matching order or None
+        """
+        try:
+            from datetime import datetime, timezone
+            
+            current_time = datetime.now(timezone.utc)
+            
+            # Assume typical order duration is 72 hours (can be adjusted)
+            TYPICAL_ORDER_DURATION_SECONDS = 72 * 3600  # 72 hours
+            
+            best_match = None
+            smallest_difference = float('inf')
+            
+            # Determine which timestamp to use based on trigger condition
+            is_tp_condition = self._is_tp_condition(trigger_condition) or "TP" in trigger_condition.upper()
+            timestamp_type = "updated_at" if is_tp_condition else "created_at"
+            
+            logger.info(f"      🕐 Matching by expiry time ({expiry_seconds}s remaining):")
+            logger.info(f"         Using {timestamp_type} timestamp (TP condition: {is_tp_condition})")
+            
+            for order in active_orders:
+                try:
+                    # Choose reference time based on trigger condition
+                    if is_tp_condition and order.updated_at:
+                        # For TP conditions, use updated_at since BullX updates expiry when order is entered
+                        reference_time = order.updated_at
+                        time_label = "Updated"
+                    else:
+                        # For entry conditions, use created_at since order hasn't been entered yet
+                        reference_time = order.created_at
+                        time_label = "Created"
+                    
+                    # Ensure timezone awareness
+                    if reference_time.tzinfo is None:
+                        reference_time_utc = reference_time.replace(tzinfo=timezone.utc)
+                    else:
+                        reference_time_utc = reference_time
+                    
+                    elapsed_seconds = (current_time - reference_time_utc).total_seconds()
+                    
+                    # Expected elapsed time based on expiry
+                    expected_elapsed = TYPICAL_ORDER_DURATION_SECONDS - expiry_seconds
+                    
+                    # Calculate difference
+                    time_difference = abs(elapsed_seconds - expected_elapsed)
+                    
+                    logger.info(f"         Order ID {order.id} (Bracket {order.bracket_id}):")
+                    logger.info(f"           {time_label}: {reference_time_utc}")
+                    logger.info(f"           Elapsed: {elapsed_seconds:.0f}s ({elapsed_seconds/3600:.1f}h)")
+                    logger.info(f"           Expected: {expected_elapsed:.0f}s ({expected_elapsed/3600:.1f}h)")
+                    logger.info(f"           Difference: {time_difference:.0f}s ({time_difference/3600:.1f}h)")
+                    
+                    if time_difference < smallest_difference:
+                        smallest_difference = time_difference
+                        best_match = order
+                        
+                except Exception as e:
+                    logger.error(f"         Error processing order {order.id}: {e}")
+                    continue
+            
+            if best_match:
+                logger.info(f"      ✅ Best match: Order ID {best_match.id} (Bracket {best_match.bracket_id})")
+                logger.info(f"         Time difference: {smallest_difference:.0f}s ({smallest_difference/3600:.1f}h)")
+                logger.info(f"         Reference: {timestamp_type}")
+            else:
+                logger.info(f"      ❌ No suitable match found")
+            
+            return best_match
+            
+        except Exception as e:
+            logger.error(f"Error matching by expiry time: {e}")
+            return None
+    
+    def _update_order_trigger_condition(self, order_id: int, trigger_condition: str) -> bool:
+        """Update the trigger condition for an order in the database"""
+        try:
+            success = db_manager.update_order_trigger_condition(order_id, trigger_condition)
+            if success:
+                logger.debug(f"Updated trigger condition for order {order_id}: '{trigger_condition}'")
+            else:
+                logger.warning(f"Failed to update trigger condition for order {order_id}")
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error updating trigger condition for order {order_id}: {e}")
+            return False
+    
+    def _is_bullx_automation_refresh(self, old_trigger: str, new_trigger: str) -> bool:
+        """
+        Detect if this is a BullX automation refresh (entry → TP/SL transition).
+        
+        Args:
+            old_trigger: Previous trigger condition from database
+            new_trigger: Current trigger condition from BullX
+            
+        Returns:
+            True if this is a BullX automation refresh, False otherwise
+        """
+        try:
+            if not old_trigger or not new_trigger:
+                return False
+            
+            # Check if old trigger was an entry condition
+            is_old_entry = "Buy below" in old_trigger
+            
+            # Check if new trigger is a TP/SL condition
+            is_new_tp_sl = new_trigger in ["1 TP, 1 SL", "1 TP", "1 SL"]
+            
+            return is_old_entry and is_new_tp_sl
+            
+        except Exception as e:
+            logger.error(f"Error detecting BullX automation refresh: {e}")
+            return False
+    
+    def _calculate_bullx_update_time(self, expiry: str) -> Optional['datetime']:
+        """
+        Calculate when BullX updated the order using the 72h formula.
+        
+        Formula: bullx_update_time = current_time - (72h - current_expiry)
+        
+        Args:
+            expiry: Current expiry time from BullX (e.g., "56h 42m 17s")
+            
+        Returns:
+            Calculated BullX update time, or None if calculation fails
+        """
+        try:
+            from datetime import datetime, timezone, timedelta
+            
+            # Parse current expiry to seconds
+            expiry_seconds = self._parse_expiry_to_seconds(expiry)
+            if expiry_seconds is None:
+                logger.warning(f"Could not parse expiry time: '{expiry}'")
+                return None
+            
+            current_time = datetime.now(timezone.utc)
+            
+            # 72 hours in seconds (typical BullX order duration)
+            BULLX_ORDER_DURATION_SECONDS = 72 * 3600
+            
+            # Calculate elapsed time since BullX updated the order
+            elapsed_since_update = BULLX_ORDER_DURATION_SECONDS - expiry_seconds
+            
+            # Calculate when BullX updated the order
+            bullx_update_time = current_time - timedelta(seconds=elapsed_since_update)
+            
+            logger.debug(f"BullX update time calculation:")
+            logger.debug(f"  Current time: {current_time}")
+            logger.debug(f"  Expiry remaining: {expiry_seconds}s ({expiry_seconds/3600:.1f}h)")
+            logger.debug(f"  Elapsed since update: {elapsed_since_update}s ({elapsed_since_update/3600:.1f}h)")
+            logger.debug(f"  Calculated BullX update time: {bullx_update_time}")
+            
+            return bullx_update_time
+            
+        except Exception as e:
+            logger.error(f"Error calculating BullX update time: {e}")
+            return None
+    
+    def _update_order_with_bullx_refresh(self, order_id: int, trigger_condition: str, bullx_update_time: 'datetime') -> bool:
+        """Update order with BullX automation refresh using calculated update time"""
+        try:
+            success = db_manager.update_order_with_bullx_refresh(order_id, trigger_condition, bullx_update_time)
+            if success:
+                logger.debug(f"Updated order {order_id} with BullX refresh: trigger='{trigger_condition}', updated_at={bullx_update_time}")
+            else:
+                logger.warning(f"Failed to update order {order_id} with BullX refresh")
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error updating order with BullX refresh: {e}")
+            return False
     
     async def _mark_order_for_renewal(self, order: Order, parsed_data: Dict[str, Any], 
                                     button_index: int, row_index: int):

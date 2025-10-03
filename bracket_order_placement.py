@@ -500,11 +500,12 @@ class BracketOrderPlacer:
                 EC.element_to_be_clickable((By.XPATH, "//button/span[contains(text(), 'Buy')]"))
             )
             confirm_button.click()
+            time.sleep(1)
             
             # Wait for order confirmation or success message
             try:
                 WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.XPATH, "//div[contains(text(), 'success') or contains(text(), 'placed') or contains(@class, 'success')]"))
+                    EC.presence_of_element_located((By.XPATH, "//div/span[contains(text(), 'success') or contains(text(), 'completed') or contains(@class, 'success')]"))
                 )
                 logger.info("Order placed successfully")
                 

@@ -215,6 +215,10 @@ class EnhancedOrderProcessor:
             if len(coin_orders) < 4:
                 missing_orders = await self._identify_missing_orders(coin, coin_orders, profile_name)
             
+            # Update trigger conditions for all orders during coin processing
+            logger.info(f"  📝 Updating trigger conditions for all {token} orders...")
+            await self._update_trigger_conditions_for_coin(profile_name, coin, coin_orders)
+            
             # Process TP conditions and prepare for deletion
             tp_orders = []
             for order_info in coin_orders:
@@ -699,34 +703,7 @@ class EnhancedOrderProcessor:
                 identification_method = "sequential_fallback"
                 logger.info(f"      ⚠️  Sequential fallback: Order ID {matched_order.id}, Bracket ID {sub_id}")
             
-            # Update trigger condition in database if we found a match AND it's different
-            if matched_order and trigger_condition:
-                if matched_order.trigger_condition != trigger_condition:
-                    # Check if this is a BullX automation refresh (entry → TP/SL transition)
-                    is_bullx_refresh = self._is_bullx_automation_refresh(
-                        matched_order.trigger_condition, trigger_condition
-                    )
-                    
-                    if is_bullx_refresh:
-                        # Calculate when BullX updated the order using expiry time
-                        bullx_update_time = self._calculate_bullx_update_time(expiry)
-                        if bullx_update_time:
-                            self._update_order_with_bullx_refresh(
-                                matched_order.id, trigger_condition, bullx_update_time
-                            )
-                            logger.info(f"🔄 BullX automation refresh detected for order {matched_order.id}:")
-                            logger.info(f"   Trigger: '{matched_order.trigger_condition}' → '{trigger_condition}'")
-                            logger.info(f"   Calculated BullX update time: {bullx_update_time}")
-                        else:
-                            # Fallback to regular update if calculation fails
-                            self._update_order_trigger_condition(matched_order.id, trigger_condition)
-                            logger.warning(f"Could not calculate BullX update time, using regular update for order {matched_order.id}")
-                    else:
-                        # Regular trigger condition update
-                        self._update_order_trigger_condition(matched_order.id, trigger_condition)
-                        logger.debug(f"Updated trigger condition for order {matched_order.id}: '{matched_order.trigger_condition}' -> '{trigger_condition}'")
-                else:
-                    logger.debug(f"Trigger condition unchanged for order {matched_order.id}: '{trigger_condition}'")
+            # Note: Trigger condition updates are now handled separately during coin order processing
             
             # Final result
             if sub_id and matched_order:
@@ -1046,6 +1023,309 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"Error updating order with BullX refresh: {e}")
             return False
+    
+    async def _update_trigger_conditions_for_coin(self, profile_name: str, coin: Coin, coin_orders: List[Dict]):
+        """Update trigger conditions for all orders of a coin using wallet-based identification"""
+        try:
+            logger.info(f"    🔄 Updating trigger conditions for {len(coin_orders)} {coin.name or coin.address} orders...")
+            
+            # Get all active orders for this coin and profile
+            all_orders = db_manager.get_orders_by_coin(coin.id)
+            active_orders = [o for o in all_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
+            
+            if not active_orders:
+                logger.info(f"      ❌ No active orders found in database for {coin.name or coin.address}")
+                return
+            
+            # Get bracket configuration
+            if not coin.bracket or coin.bracket not in BRACKET_CONFIG:
+                logger.warning(f"      ❌ No valid bracket found for coin")
+                return
+            
+            bracket_config = BRACKET_CONFIG[coin.bracket]
+            bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
+            
+            logger.info(f"      📊 Using bracket {coin.bracket} with entries: {bracket_entries}")
+            logger.info(f"      📋 Found {len(active_orders)} active orders in database")
+            
+            # NEW: Wallet-based identification as primary method
+            matched_orders = {}  # {order_id: order_info}
+            unmatched_order_infos = []
+            
+            logger.info(f"      🎯 PRIMARY METHOD: Wallet-based identification...")
+            
+            for order_info in coin_orders:
+                try:
+                    parsed_data = order_info.get('parsed_data', {})
+                    trigger_condition = parsed_data.get('trigger_condition', '')
+                    
+                    if not trigger_condition:
+                        continue
+                    
+                    # Primary: Identify by wallet count
+                    bracket_sub_id = self._identify_order_by_wallet_count(parsed_data)
+                    
+                    if bracket_sub_id:
+                        # Verify with entry price where possible
+                        is_verified = self._verify_with_entry_price(bracket_sub_id, trigger_condition, bracket_entries)
+                        
+                        # Find the specific order with this bracket_sub_id
+                        matched_order = None
+                        for order in active_orders:
+                            if order.bracket_id == bracket_sub_id and order.id not in matched_orders:
+                                matched_order = order
+                                break
+                        
+                        if matched_order:
+                            matched_orders[matched_order.id] = order_info
+                            verification_status = "✅ Verified" if is_verified else "⚠️  Unverified"
+                            logger.info(f"         🎯 Wallet-based match: {bracket_sub_id} wallets → Order ID {matched_order.id} (Bracket {bracket_sub_id}) {verification_status}")
+                            
+                            # Update trigger condition immediately
+                            await self._update_single_order_trigger_condition(matched_order, trigger_condition, parsed_data.get('expiry', ''))
+                            continue
+                    
+                    # If wallet-based identification failed, add to unmatched list
+                    unmatched_order_infos.append(order_info)
+                    
+                except Exception as e:
+                    logger.error(f"         💥 Error in wallet-based matching: {e}")
+                    unmatched_order_infos.append(order_info)
+            
+            # Fallback: Legacy identification methods (DISABLED - wallet-based identification is primary)
+            if unmatched_order_infos:
+                logger.info(f"      🎯 FALLBACK: Processing {len(unmatched_order_infos)} unmatched orders...")
+                logger.info(f"         (Legacy identification methods are disabled - wallet-based identification should handle all orders)")
+                
+                # LEGACY METHODS (COMMENTED OUT - Use wallet-based identification instead)
+                # 
+                # # Get unmatched database orders
+                # unmatched_db_orders = [o for o in active_orders if o.id not in matched_orders]
+                # 
+                # for order_info in unmatched_order_infos:
+                #     try:
+                #         parsed_data = order_info.get('parsed_data', {})
+                #         trigger_condition = parsed_data.get('trigger_condition', '')
+                #         expiry = parsed_data.get('expiry', '')
+                #         
+                #         if not trigger_condition:
+                #             continue
+                #         
+                #         # Use remaining identification methods for unmatched orders
+                #         matched_order = self._identify_remaining_order(
+                #             parsed_data, unmatched_db_orders, trigger_condition, expiry
+                #         )
+                #         
+                #         if matched_order:
+                #             matched_orders[matched_order.id] = order_info
+                #             # Remove from unmatched list
+                #             unmatched_db_orders = [o for o in unmatched_db_orders if o.id != matched_order.id]
+                #             
+                #             logger.info(f"         ✅ Alternative match: Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
+                #             
+                #             # Update trigger condition
+                #             await self._update_single_order_trigger_condition(matched_order, trigger_condition, expiry)
+                #         else:
+                #             logger.warning(f"         ❌ Could not match order with trigger: '{trigger_condition}'")
+                #             
+                #     except Exception as e:
+                #         logger.error(f"         💥 Error in fallback matching: {e}")
+                
+                # Log unmatched orders for debugging
+                for order_info in unmatched_order_infos:
+                    parsed_data = order_info.get('parsed_data', {})
+                    trigger_condition = parsed_data.get('trigger_condition', '')
+                    wallets = parsed_data.get('wallets', 'Unknown')
+                    logger.warning(f"         ❌ Unmatched order: Trigger='{trigger_condition}', Wallets='{wallets}'")
+                    logger.warning(f"            → Ensure wallet count matches bracket sub ID for proper identification")
+            
+            logger.info(f"      📊 Wallet-based matching complete: {len(matched_orders)}/{len(coin_orders)} orders matched")
+                        
+        except Exception as e:
+            logger.error(f"💥 Error updating trigger conditions for coin: {e}")
+    
+    def _identify_remaining_order(self, parsed_data: Dict[str, Any], unmatched_orders: List[Order], 
+                                trigger_condition: str, expiry: str) -> Optional[Order]:
+        """Identify remaining orders using alternative methods (trigger condition, expiry time, fallback)"""
+        try:
+            if not unmatched_orders:
+                return None
+            
+            # Method 1: Try trigger condition exact match
+            for order in unmatched_orders:
+                if order.trigger_condition == trigger_condition:
+                    logger.debug(f"         🎯 Trigger condition match: Order ID {order.id}")
+                    return order
+            
+            # Method 2: Try expiry time matching if multiple orders
+            if len(unmatched_orders) > 1:
+                expiry_seconds = self._parse_expiry_to_seconds(expiry)
+                if expiry_seconds is not None:
+                    best_match = self._match_by_expiry_time(unmatched_orders, expiry_seconds, trigger_condition)
+                    if best_match:
+                        logger.debug(f"         🕐 Expiry time match: Order ID {best_match.id}")
+                        return best_match
+            
+            # Method 3: TP condition fallback
+            if self._is_tp_condition(trigger_condition) and unmatched_orders:
+                logger.debug(f"         🎯 TP fallback match: Order ID {unmatched_orders[0].id}")
+                return unmatched_orders[0]
+            
+            # Method 4: Sequential fallback (last resort)
+            if unmatched_orders:
+                unmatched_orders.sort(key=lambda x: x.bracket_id)
+                logger.debug(f"         ⚠️  Sequential fallback: Order ID {unmatched_orders[0].id}")
+                return unmatched_orders[0]
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error identifying remaining order: {e}")
+            return None
+    
+    async def _update_single_order_trigger_condition(self, order: Order, trigger_condition: str, expiry: str):
+        """Update trigger condition for a single order with BullX timing"""
+        try:
+            current_trigger = order.trigger_condition
+            
+            # Update if different OR if current is None/empty (initial state)
+            should_update = (
+                current_trigger != trigger_condition or 
+                current_trigger is None or 
+                current_trigger == "" or 
+                current_trigger == "None"
+            )
+            
+            if should_update:
+                # Always try to calculate BullX update time for any trigger condition change
+                bullx_update_time = self._calculate_bullx_update_time(expiry)
+                
+                if bullx_update_time:
+                    # Use calculated BullX update time for all updates
+                    self._update_order_with_bullx_refresh(
+                        order.id, trigger_condition, bullx_update_time
+                    )
+                    
+                    # Check if this is a BullX automation refresh (entry → TP/SL transition) for logging
+                    is_bullx_refresh = self._is_bullx_automation_refresh(
+                        current_trigger, trigger_condition
+                    )
+                    
+                    if is_bullx_refresh:
+                        logger.info(f"         🔄 BullX automation refresh detected for order {order.id}:")
+                        logger.info(f"            Trigger: '{current_trigger}' → '{trigger_condition}'")
+                        logger.info(f"            Calculated BullX update time: {bullx_update_time}")
+                    elif current_trigger is None or current_trigger == "" or current_trigger == "None":
+                        logger.info(f"         📝 Initial trigger condition set for order {order.id}: '{trigger_condition}'")
+                        logger.info(f"            Calculated BullX update time: {bullx_update_time}")
+                    else:
+                        logger.info(f"         📝 Updated trigger condition for order {order.id}: '{current_trigger}' → '{trigger_condition}'")
+                        logger.info(f"            Calculated BullX update time: {bullx_update_time}")
+                else:
+                    # Fallback to regular update if calculation fails
+                    self._update_order_trigger_condition(order.id, trigger_condition)
+                    logger.warning(f"         ⚠️  Could not calculate BullX update time, using regular update for order {order.id}")
+                    
+                    if current_trigger is None or current_trigger == "" or current_trigger == "None":
+                        logger.info(f"         📝 Initial trigger condition set for order {order.id}: '{trigger_condition}'")
+                    else:
+                        logger.debug(f"         📝 Updated trigger condition for order {order.id}: '{current_trigger}' → '{trigger_condition}'")
+            else:
+                logger.debug(f"         ✅ Trigger condition unchanged for order {order.id}: '{trigger_condition}'")
+                
+        except Exception as e:
+            logger.error(f"Error updating single order trigger condition: {e}")
+    
+    def _identify_order_by_wallet_count(self, parsed_data: Dict[str, Any]) -> Optional[int]:
+        """
+        Primary identification method: Identify bracket sub ID by wallet count.
+        
+        Wallet count directly maps to bracket sub ID:
+        - 1 wallet → Bracket Sub ID 1
+        - 2 wallets → Bracket Sub ID 2  
+        - 3 wallets → Bracket Sub ID 3
+        - 4 wallets → Bracket Sub ID 4
+        
+        Args:
+            parsed_data: Parsed row data from BullX
+            
+        Returns:
+            Bracket sub ID (1-4) or None if not identifiable
+        """
+        try:
+            wallets = parsed_data.get('wallets', '')
+            
+            if not wallets:
+                logger.debug(f"No wallet count found in parsed data")
+                return None
+            
+            try:
+                wallet_count = int(wallets)
+                
+                if 1 <= wallet_count <= 4:
+                    logger.debug(f"Wallet-based identification: {wallet_count} wallets → Bracket Sub ID {wallet_count}")
+                    return wallet_count
+                else:
+                    logger.warning(f"Wallet count {wallet_count} is outside expected range (1-4)")
+                    return None
+                    
+            except ValueError:
+                logger.warning(f"Could not parse wallet count '{wallets}' as integer")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error identifying order by wallet count: {e}")
+            return None
+    
+    def _verify_with_entry_price(self, bracket_sub_id: int, trigger_condition: str, bracket_entries: List[float]) -> bool:
+        """
+        Secondary verification: Verify wallet-based identification with entry price where possible.
+        
+        Args:
+            bracket_sub_id: Bracket sub ID from wallet count (1-4)
+            trigger_condition: Trigger condition from BullX
+            bracket_entries: List of bracket entry prices [entry1, entry2, entry3, entry4]
+            
+        Returns:
+            True if verified or verification not possible, False if mismatch detected
+        """
+        try:
+            # Extract entry price from trigger condition
+            entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+            
+            if not entry_price:
+                # Can't verify without entry price, assume wallet ID is correct
+                logger.debug(f"No entry price found for verification - assuming wallet-based ID is correct")
+                return True
+            
+            # Get expected entry price for this bracket sub ID
+            if bracket_sub_id < 1 or bracket_sub_id > len(bracket_entries):
+                logger.warning(f"Bracket sub ID {bracket_sub_id} is outside bracket entries range")
+                return False
+            
+            expected_entry = bracket_entries[bracket_sub_id - 1]  # Convert to 0-based index
+            
+            # Allow tolerance for floating point comparison
+            tolerance = 1000  # 1000 unit tolerance
+            difference = abs(entry_price - expected_entry)
+            
+            is_verified = difference <= tolerance
+            
+            logger.debug(f"Entry price verification:")
+            logger.debug(f"  Bracket Sub ID: {bracket_sub_id}")
+            logger.debug(f"  Expected Entry: ${expected_entry:,.0f}")
+            logger.debug(f"  Actual Entry: ${entry_price:,.0f}")
+            logger.debug(f"  Difference: ${difference:,.0f}")
+            logger.debug(f"  Verified: {is_verified}")
+            
+            if not is_verified:
+                logger.warning(f"Entry price verification failed: expected ${expected_entry:,.0f}, got ${entry_price:,.0f}")
+            
+            return is_verified
+            
+        except Exception as e:
+            logger.error(f"Error verifying with entry price: {e}")
+            return True  # Assume correct if verification fails
     
     async def _mark_order_for_renewal(self, order: Order, parsed_data: Dict[str, Any], 
                                     button_index: int, row_index: int):

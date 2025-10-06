@@ -175,6 +175,10 @@ class BracketOrderPlacer:
             #if not self._navigate_to_buy_interface(driver):
             #    return {"success": False, "error": "Failed to navigate to buy interface"}
             
+            # Select wallets based on bracket_id BEFORE setting market/limit order
+            if not self._select_wallets_for_bracket_sub_id(driver, bracket_id):
+                return {"success": False, "error": f"Failed to select wallets for bracket sub ID {bracket_id}"}
+
             # Handle market vs limit order placement
             if is_market_order:
                 # Place market order immediately
@@ -492,6 +496,90 @@ class BracketOrderPlacer:
             logger.error(f"Failed to take screenshot: {e}")
             return None
     
+    def _select_wallets_for_bracket_sub_id(self, driver, bracket_sub_id: int) -> bool:
+        """
+        Select wallets based on bracket sub ID for order identification.
+        
+        Wallet selection logic:
+        - Sub ID 1 → 1 wallet (first only)
+        - Sub ID 2 → 2 wallets (first + second)
+        - Sub ID 3 → 3 wallets (first + second + third)
+        - Sub ID 4 → 4 wallets (all four)
+        
+        Args:
+            driver: Selenium WebDriver instance
+            bracket_sub_id: Bracket sub ID (1-4)
+            
+        Returns:
+            True if wallet selection successful, False otherwise
+        """
+        try:
+            logger.info(f"🔧 Selecting {bracket_sub_id} wallet(s) for bracket sub ID {bracket_sub_id}")
+            
+            # Click wallet selection button
+            wallet_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[@id='rc-tabs-106-panel-sell']/div/div[1]/div[1]/div[3]/button"))
+            )
+            wallet_button.click()
+            logger.info("✅ Clicked wallet selection button")
+            
+            # Wait for wallet list to appear
+            time.sleep(2)
+            
+            # Find all wallet checkboxes
+            checkboxes = WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "input.ant-checkbox-input[type='checkbox']"))
+            )
+            
+            logger.info(f"📋 Found {len(checkboxes)} wallet checkboxes")
+            
+            if len(checkboxes) < bracket_sub_id:
+                logger.error(f"❌ Not enough wallets available. Need {bracket_sub_id}, found {len(checkboxes)}")
+                return False
+            
+            # Select wallets: first wallet + (bracket_sub_id - 1) additional
+            for i, checkbox in enumerate(checkboxes):
+                try:
+                    if i < bracket_sub_id:
+                        # Check this wallet (should be selected)
+                        if not checkbox.is_selected():
+                            # Click the parent label to check the checkbox
+                            parent_label = checkbox.find_element(By.XPATH, "./..")
+                            parent_label.click()
+                            logger.info(f"  ✅ Selected wallet {i + 1}")
+                        else:
+                            logger.info(f"  ✅ Wallet {i + 1} already selected")
+                    else:
+                        # Uncheck this wallet (should not be selected)
+                        if checkbox.is_selected():
+                            # Click the parent label to uncheck the checkbox
+                            parent_label = checkbox.find_element(By.XPATH, "./..")
+                            parent_label.click()
+                            logger.info(f"  ❌ Deselected wallet {i + 1}")
+                        else:
+                            logger.info(f"  ❌ Wallet {i + 1} already deselected")
+                            
+                except Exception as e:
+                    logger.warning(f"  ⚠️  Error handling wallet {i + 1}: {e}")
+                    continue
+            
+            # Brief pause to let UI update
+            time.sleep(1)
+            
+            # Verify selection by counting selected checkboxes
+            selected_count = sum(1 for cb in checkboxes if cb.is_selected())
+            
+            if selected_count == bracket_sub_id:
+                logger.info(f"✅ Wallet selection successful: {selected_count}/{bracket_sub_id} wallets selected")
+                return True
+            else:
+                logger.warning(f"⚠️  Wallet selection verification failed: {selected_count}/{bracket_sub_id} wallets selected")
+                return True  # Continue anyway, might still work
+                
+        except Exception as e:
+            logger.error(f"💥 Failed to select wallets for bracket sub ID {bracket_sub_id}: {e}")
+            return False
+    
     def _confirm_order(self, driver, token_name: str = "Unknown", bracket: int = 0, bracket_id: int = 0) -> bool:
         """Confirm and place the order"""
         try:
@@ -505,7 +593,7 @@ class BracketOrderPlacer:
             # Wait for order confirmation or success message
             try:
                 WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.XPATH, "//div/span[contains(text(), 'success') or contains(text(), 'completed') or contains(@class, 'success')]"))
+                    EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'success') or contains(text(), 'completed') or contains(@class, 'success')]"))
                 )
                 logger.info("Order placed successfully")
                 

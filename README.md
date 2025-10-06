@@ -67,6 +67,25 @@ BullXAuto/
      - `%USERPROFILE%\AppData\Local\Google\Chrome\User Data\Profile Saruman`
      - `%USERPROFILE%\AppData\Local\Google\Chrome\User Data\Profile Gandalf`
 
+4. **Set up BullX wallets (REQUIRED):**
+   - **Create at least 4 wallets** in your BullX account
+   - **Only the first wallet needs to be funded** (the others are used for order identification)
+   - The wallet count is used to identify which bracket sub ID each order belongs to:
+     - 1 wallet selected = Bracket Sub ID 1
+     - 2 wallets selected = Bracket Sub ID 2  
+     - 3 wallets selected = Bracket Sub ID 3
+     - 4 wallets selected = Bracket Sub ID 4
+
+5. **Create auto-sell strategies:**
+   - Create auto-sell strategies in BullX with the following naming convention:
+   - **Format:** `Bracket{BracketID}_{BracketSubID}`
+   - **Bracket IDs:** 1-5 (based on market cap ranges)
+   - **Bracket Sub IDs:** 1-4 (for each entry level within a bracket)
+   - **Examples:**
+     - `Bracket1_1` - Bracket 1, Sub ID 1
+     - `Bracket2_3` - Bracket 2, Sub ID 3  
+     - `Bracket5_4` - Bracket 5, Sub ID 4
+
 ## Usage
 
 ### Starting the API

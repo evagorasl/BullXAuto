@@ -44,6 +44,7 @@ class Order(Base):
     profile_name = Column(String, nullable=False)
     is_market_order = Column(Boolean, nullable=True)  # Whether this was a market order or limit order
     trigger_condition = Column(String, nullable=True)  # Last known trigger condition from BullX
+    order_amount = Column(String, nullable=True)  # Order amount displayed in BullX (e.g., "0.5" for SOL or "289.55K STIMMY" for tokens)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     completed_at = Column(DateTime, nullable=True)  # When the order was completed/stopped

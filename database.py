@@ -129,6 +129,23 @@ class DatabaseManager:
         finally:
             db.close()
     
+    def update_order_amount(self, order_id: int, order_amount: str) -> bool:
+        """Update order amount field with the value displayed in BullX Orders tab"""
+        db = self.SessionLocal()
+        try:
+            order = db.query(Order).filter(Order.id == order_id).first()
+            if order:
+                order.order_amount = order_amount
+                order.updated_at = datetime.now()
+                db.commit()
+                return True
+            return False
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+    
     def update_order_with_bullx_refresh(self, order_id: int, trigger_condition: str, bullx_update_time: datetime) -> bool:
         """Update order with BullX automation refresh - sets trigger condition and calculated BullX update time"""
         db = self.SessionLocal()

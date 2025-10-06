@@ -175,9 +175,18 @@ class BracketOrderPlacer:
             #if not self._navigate_to_buy_interface(driver):
             #    return {"success": False, "error": "Failed to navigate to buy interface"}
             
-            # Select wallets based on bracket_id BEFORE setting market/limit order
-            if not self._select_wallets_for_bracket_sub_id(driver, bracket_id):
-                return {"success": False, "error": f"Failed to select wallets for bracket sub ID {bracket_id}"}
+            # Click Orders tab and get initial row count BEFORE placing order
+            logger.info("📋 Clicking Orders tab to track new order...")
+            initial_row_count = self._click_orders_tab_and_get_count(driver)
+            if initial_row_count is None:
+                logger.warning("⚠️  Could not get initial row count from Orders tab")
+                initial_row_count = 0  # Continue anyway
+            else:
+                logger.info(f"📊 Initial row count in Orders tab: {initial_row_count}")
+            
+            # COMMENTED OUT: Wallet selection (no longer used for identification)
+            # if not self._select_wallets_for_bracket_sub_id(driver, bracket_id):
+            #     return {"success": False, "error": f"Failed to select wallets for bracket sub ID {bracket_id}"}
 
             # Handle market vs limit order placement
             if is_market_order:
@@ -224,6 +233,27 @@ class BracketOrderPlacer:
             
             # Create order with coin relationship
             db_result = db_manager.create_order_with_coin(address, order_data)
+            
+            # After order confirmation, wait for new order to appear in Orders tab and extract order_amount
+            if db_result and initial_row_count is not None:
+                logger.info("⏳ Waiting for new order to appear in Orders tab...")
+                if self._wait_for_new_order_row(driver, initial_row_count):
+                    logger.info("✅ New order detected in Orders tab")
+                    
+                    # Extract order amount from top row
+                    order_amount = self._extract_order_amount_from_top_row(driver)
+                    if order_amount:
+                        logger.info(f"📊 Extracted order amount: '{order_amount}'")
+                        
+                        # Save order_amount to database
+                        if db_manager.update_order_amount(db_result.id, order_amount):
+                            logger.info(f"✅ Saved order_amount to database for order {db_result.id}")
+                        else:
+                            logger.warning(f"⚠️  Failed to save order_amount to database")
+                    else:
+                        logger.warning("⚠️  Could not extract order amount from Orders tab")
+                else:
+                    logger.warning("⚠️  Timeout waiting for new order in Orders tab")
             
             return {
                 "success": True,
@@ -518,7 +548,7 @@ class BracketOrderPlacer:
             
             # Click wallet selection button
             wallet_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//*[@id='rc-tabs-106-panel-sell']/div/div[1]/div[1]/div[3]/button"))
+                EC.element_to_be_clickable((By.XPATH, "//div[contains(@id,'panel-sell')]/div/div[1]/div[1]/div[3]/button"))
             )
             wallet_button.click()
             logger.info("✅ Clicked wallet selection button")
@@ -592,7 +622,7 @@ class BracketOrderPlacer:
             
             # Wait for order confirmation or success message
             try:
-                WebDriverWait(driver, 15).until(
+                WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'success') or contains(text(), 'completed') or contains(@class, 'success')]"))
                 )
                 logger.info("Order placed successfully")
@@ -611,6 +641,133 @@ class BracketOrderPlacer:
         except Exception as e:
             logger.error(f"Failed to confirm order: {e}")
             return False
+    
+    def _click_orders_tab_and_get_count(self, driver) -> Optional[int]:
+        """
+        Click the Orders tab and get the initial row count.
+        
+        Returns:
+            Number of rows in Orders tab, or None if failed
+        """
+        try:
+            # Try first XPATH for Orders tab
+            try:
+                orders_tab = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, "//div[contains(@id,'tab-orders')]/div/span[2]/div/div/span"))
+                )
+                orders_tab.click()
+                logger.info("✅ Clicked Orders tab (first XPATH)")
+            except:
+                # Try alternative selector
+                orders_tab = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, "//span[@class='block' and contains(text(), 'Orders')]/.."))
+                )
+                orders_tab.click()
+                logger.info("✅ Clicked Orders tab (alternative selector)")
+            
+            # Wait for Orders tab content to load
+            time.sleep(1)
+            
+            # Get current row count
+            row_count = self._get_orders_row_count(driver)
+            return row_count
+            
+        except Exception as e:
+            logger.error(f"Failed to click Orders tab: {e}")
+            return None
+    
+    def _get_orders_row_count(self, driver) -> int:
+        """Get the number of rows in the Orders tab"""
+        try:
+            rows = driver.find_elements(
+                By.XPATH,
+                "//div[contains(@id, 'panel-orders')]/div/div/div/div/div/div[1]/div[2]/div/div/div/div"
+            )
+            return len(rows)
+        except Exception as e:
+            logger.debug(f"Error getting row count: {e}")
+            return 0
+    
+    def _wait_for_new_order_row(self, driver, initial_count: int, timeout: int = 10) -> bool:
+        """
+        Wait for a new order row to appear in Orders tab using WebDriverWait.
+        
+        Args:
+            driver: Selenium WebDriver instance
+            initial_count: Initial number of rows before order placement
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            True if new row detected, False otherwise
+        """
+        try:
+            time.sleep(2)
+            # Custom condition: wait until row count increases
+            def row_count_increased(driver):
+                current_count = self._get_orders_row_count(driver)
+                return current_count > initial_count
+            
+            WebDriverWait(driver, timeout).until(row_count_increased)
+            return True
+            
+        except TimeoutException:
+            logger.warning(f"Timeout waiting for new order row (waited {timeout}s)")
+            return False
+        except Exception as e:
+            logger.error(f"Error waiting for new order row: {e}")
+            return False
+    
+    def _extract_order_amount_from_top_row(self, driver) -> Optional[str]:
+        """
+        Extract order amount from the top (most recent) row in Orders tab.
+        
+        Format examples:
+        - "0.5" (SOL amount, single line)
+        - "289.55K STIMMY" (token amount, two lines combined)
+        
+        Returns:
+            Order amount string, or None if failed
+        """
+        try:
+            # Get the amount element from first row (div[1])
+            amount_element = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((
+                    By.XPATH,
+                    "//div[contains(@id,'panel-orders')]/div/div/div/div/div/div[1]/div[2]/div/div/div/div[1]/div/a/div[3]/div"
+                ))
+            )
+            
+            # Get text content
+            text_content = amount_element.text.strip()
+            
+            if not text_content:
+                logger.warning("Empty text content from amount element")
+                return None
+            
+            # Parse based on number of lines
+            lines = text_content.split('\n')
+            lines = [line.strip() for line in lines if line.strip()]
+            
+            if len(lines) == 1:
+                # Single line - SOL amount (token name omitted)
+                order_amount = lines[0]
+                logger.debug(f"Extracted SOL amount: '{order_amount}'")
+            elif len(lines) >= 2:
+                # Two+ lines - combine number and token name
+                order_amount = f"{lines[0]} {lines[1]}"
+                logger.debug(f"Extracted token amount: '{order_amount}'")
+            else:
+                logger.warning(f"Unexpected text format: '{text_content}'")
+                order_amount = text_content
+            
+            return order_amount
+            
+        except TimeoutException:
+            logger.warning("Timeout waiting for order amount element")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to extract order amount: {e}")
+            return None
     
     def replace_bracket_order(self, profile_name: str, address: str, bracket_id: int,
                             new_amount: float, strategy_number: int = 1, 

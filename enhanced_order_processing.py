@@ -1025,7 +1025,7 @@ class EnhancedOrderProcessor:
             return False
     
     async def _update_trigger_conditions_for_coin(self, profile_name: str, coin: Coin, coin_orders: List[Dict]):
-        """Update trigger conditions for all orders of a coin using wallet-based identification"""
+        """Update trigger conditions for all orders of a coin using order_amount-based identification"""
         try:
             logger.info(f"    🔄 Updating trigger conditions for {len(coin_orders)} {coin.name or coin.address} orders...")
             
@@ -1048,98 +1048,128 @@ class EnhancedOrderProcessor:
             logger.info(f"      📊 Using bracket {coin.bracket} with entries: {bracket_entries}")
             logger.info(f"      📋 Found {len(active_orders)} active orders in database")
             
-            # NEW: Wallet-based identification as primary method
+            # Track matched orders
             matched_orders = {}  # {order_id: order_info}
-            unmatched_order_infos = []
+            unmatched_db_orders = list(active_orders)  # Start with all active orders
             
-            logger.info(f"      🎯 PRIMARY METHOD: Wallet-based identification...")
+            logger.info(f"      🎯 3-STEP IDENTIFICATION PROCESS:")
+            
+            # STEP 1: Identify "Buy Limit" orders with "Buy below..." trigger conditions (unfulfilled entry orders)
+            logger.info(f"      📍 STEP 1: Identifying unfulfilled 'Buy Limit' orders with 'Buy below...' triggers")
             
             for order_info in coin_orders:
                 try:
                     parsed_data = order_info.get('parsed_data', {})
                     trigger_condition = parsed_data.get('trigger_condition', '')
+                    order_type = parsed_data.get('type', '')
                     
                     if not trigger_condition:
                         continue
                     
-                    # Primary: Identify by wallet count
-                    bracket_sub_id = self._identify_order_by_wallet_count(parsed_data)
-                    
-                    if bracket_sub_id:
-                        # Verify with entry price where possible
-                        is_verified = self._verify_with_entry_price(bracket_sub_id, trigger_condition, bracket_entries)
+                    # Step 1: Match by "Buy below..." trigger (unfulfilled limit orders)
+                    if trigger_condition.startswith("Buy below"):
+                        entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+                        if entry_price:
+                            sub_id = self._match_entry_to_sub_id(entry_price, bracket_entries)
+                            if sub_id:
+                                # Find the order with this sub_id from unmatched list
+                                matched_order = None
+                                for order in unmatched_db_orders:
+                                    if order.bracket_id == sub_id:
+                                        matched_order = order
+                                        break
+                                
+                                if matched_order:
+                                    matched_orders[matched_order.id] = order_info
+                                    unmatched_db_orders.remove(matched_order)
+                                    logger.info(f"         ✅ Step 1 Match: Entry price ${entry_price:,.0f} → Order ID {matched_order.id} (Bracket {sub_id})")
+                                    
+                                    # Update trigger condition AND order_amount
+                                    await self._update_single_order_trigger_condition(
+                                        matched_order, 
+                                        trigger_condition, 
+                                        parsed_data.get('expiry', ''),
+                                        parsed_data.get('order_amount', '')
+                                    )
                         
-                        # Find the specific order with this bracket_sub_id
-                        matched_order = None
-                        for order in active_orders:
-                            if order.bracket_id == bracket_sub_id and order.id not in matched_orders:
-                                matched_order = order
-                                break
-                        
-                        if matched_order:
-                            matched_orders[matched_order.id] = order_info
-                            verification_status = "✅ Verified" if is_verified else "⚠️  Unverified"
-                            logger.info(f"         🎯 Wallet-based match: {bracket_sub_id} wallets → Order ID {matched_order.id} (Bracket {bracket_sub_id}) {verification_status}")
-                            
-                            # Update trigger condition immediately
-                            await self._update_single_order_trigger_condition(matched_order, trigger_condition, parsed_data.get('expiry', ''))
-                            continue
-                    
-                    # If wallet-based identification failed, add to unmatched list
-                    unmatched_order_infos.append(order_info)
-                    
                 except Exception as e:
-                    logger.error(f"         💥 Error in wallet-based matching: {e}")
-                    unmatched_order_infos.append(order_info)
+                    logger.error(f"         💥 Error in Step 1 matching: {e}")
             
-            # Fallback: Legacy identification methods (DISABLED - wallet-based identification is primary)
-            if unmatched_order_infos:
-                logger.info(f"      🎯 FALLBACK: Processing {len(unmatched_order_infos)} unmatched orders...")
-                logger.info(f"         (Legacy identification methods are disabled - wallet-based identification should handle all orders)")
-                
-                # LEGACY METHODS (COMMENTED OUT - Use wallet-based identification instead)
-                # 
-                # # Get unmatched database orders
-                # unmatched_db_orders = [o for o in active_orders if o.id not in matched_orders]
-                # 
-                # for order_info in unmatched_order_infos:
-                #     try:
-                #         parsed_data = order_info.get('parsed_data', {})
-                #         trigger_condition = parsed_data.get('trigger_condition', '')
-                #         expiry = parsed_data.get('expiry', '')
-                #         
-                #         if not trigger_condition:
-                #             continue
-                #         
-                #         # Use remaining identification methods for unmatched orders
-                #         matched_order = self._identify_remaining_order(
-                #             parsed_data, unmatched_db_orders, trigger_condition, expiry
-                #         )
-                #         
-                #         if matched_order:
-                #             matched_orders[matched_order.id] = order_info
-                #             # Remove from unmatched list
-                #             unmatched_db_orders = [o for o in unmatched_db_orders if o.id != matched_order.id]
-                #             
-                #             logger.info(f"         ✅ Alternative match: Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
-                #             
-                #             # Update trigger condition
-                #             await self._update_single_order_trigger_condition(matched_order, trigger_condition, expiry)
-                #         else:
-                #             logger.warning(f"         ❌ Could not match order with trigger: '{trigger_condition}'")
-                #             
-                #     except Exception as e:
-                #         logger.error(f"         💥 Error in fallback matching: {e}")
-                
-                # Log unmatched orders for debugging
-                for order_info in unmatched_order_infos:
+            # STEP 2: Match remaining orders by order_amount (fulfilled orders)
+            logger.info(f"      📍 STEP 2: Matching {len(coin_orders) - len(matched_orders)} remaining orders by order_amount")
+            
+            for order_info in coin_orders:
+                try:
                     parsed_data = order_info.get('parsed_data', {})
                     trigger_condition = parsed_data.get('trigger_condition', '')
-                    wallets = parsed_data.get('wallets', 'Unknown')
-                    logger.warning(f"         ❌ Unmatched order: Trigger='{trigger_condition}', Wallets='{wallets}'")
-                    logger.warning(f"            → Ensure wallet count matches bracket sub ID for proper identification")
+                    bullx_amount = parsed_data.get('order_amount', '')  # Amount from BullX display
+                    
+                    if not trigger_condition or not bullx_amount:
+                        continue
+                    
+                    # Skip if already matched in Step 1
+                    if any(oi.get('parsed_data', {}).get('trigger_condition') == trigger_condition 
+                           for oi in matched_orders.values()):
+                        continue
+                    
+                    # Step 2: Match by order_amount
+                    if unmatched_db_orders:
+                        matched_order = self._match_by_order_amount(bullx_amount, unmatched_db_orders)
+                        if matched_order:
+                            matched_orders[matched_order.id] = order_info
+                            unmatched_db_orders.remove(matched_order)
+                            logger.info(f"         ✅ Step 2 Match: Amount '{bullx_amount}' → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
+                            
+                            # Update trigger condition AND order_amount
+                            await self._update_single_order_trigger_condition(
+                                matched_order, 
+                                trigger_condition, 
+                                parsed_data.get('expiry', ''),
+                                parsed_data.get('order_amount', '')
+                            )
+                        
+                except Exception as e:
+                    logger.error(f"         💥 Error in Step 2 matching: {e}")
             
-            logger.info(f"      📊 Wallet-based matching complete: {len(matched_orders)}/{len(coin_orders)} orders matched")
+            # STEP 3: Auto-deduce single remaining order
+            remaining_bullx_orders = len(coin_orders) - len(matched_orders)
+            if remaining_bullx_orders > 0 and len(unmatched_db_orders) == 1:
+                logger.info(f"      📍 STEP 3: Auto-deducing single remaining order")
+                
+                # Find the unmatched BullX order
+                for order_info in coin_orders:
+                    parsed_data = order_info.get('parsed_data', {})
+                    trigger_condition = parsed_data.get('trigger_condition', '')
+                    
+                    # Skip if already matched
+                    if any(oi.get('parsed_data', {}).get('trigger_condition') == trigger_condition 
+                           for oi in matched_orders.values()):
+                        continue
+                    
+                    # Auto-deduce: only one DB order and one BullX order remain
+                    matched_order = unmatched_db_orders[0]
+                    matched_orders[matched_order.id] = order_info
+                    unmatched_db_orders.remove(matched_order)
+                    logger.info(f"         ✅ Step 3 Match: Auto-deduced → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
+                    
+                    # Update trigger condition AND order_amount
+                    await self._update_single_order_trigger_condition(
+                        matched_order, 
+                        trigger_condition, 
+                        parsed_data.get('expiry', ''),
+                        parsed_data.get('order_amount', '')
+                    )
+                    break
+            
+            # Log any unmatched orders
+            if len(unmatched_db_orders) > 0 or remaining_bullx_orders > len(unmatched_db_orders):
+                logger.warning(f"      ⚠️  Identification incomplete:")
+                logger.warning(f"         BullX orders: {len(coin_orders)}, Matched: {len(matched_orders)}")
+                logger.warning(f"         DB orders: {len(active_orders)}, Unmatched: {len(unmatched_db_orders)}")
+                for order in unmatched_db_orders:
+                    logger.warning(f"         ❌ Unmatched DB Order ID {order.id} (Bracket {order.bracket_id})")
+            
+            logger.info(f"      📊 Identification complete: {len(matched_orders)}/{len(coin_orders)} BullX orders matched")
                         
         except Exception as e:
             logger.error(f"💥 Error updating trigger conditions for coin: {e}")
@@ -1183,20 +1213,31 @@ class EnhancedOrderProcessor:
             logger.error(f"Error identifying remaining order: {e}")
             return None
     
-    async def _update_single_order_trigger_condition(self, order: Order, trigger_condition: str, expiry: str):
-        """Update trigger condition for a single order with BullX timing"""
+    async def _update_single_order_trigger_condition(self, order: Order, trigger_condition: str, expiry: str, order_amount: str = None):
+        """Update trigger condition AND order_amount for a single order with BullX timing"""
         try:
             current_trigger = order.trigger_condition
+            current_order_amount = order.order_amount
             
-            # Update if different OR if current is None/empty (initial state)
-            should_update = (
+            # Check if trigger condition needs update
+            trigger_needs_update = (
                 current_trigger != trigger_condition or 
                 current_trigger is None or 
                 current_trigger == "" or 
                 current_trigger == "None"
             )
             
-            if should_update:
+            # Check if order_amount needs update (only if provided)
+            amount_needs_update = False
+            if order_amount:
+                amount_needs_update = (
+                    current_order_amount != order_amount or
+                    current_order_amount is None or
+                    current_order_amount == ""
+                )
+            
+            # Update trigger condition if needed
+            if trigger_needs_update:
                 # Always try to calculate BullX update time for any trigger condition change
                 bullx_update_time = self._calculate_bullx_update_time(expiry)
                 
@@ -1230,11 +1271,24 @@ class EnhancedOrderProcessor:
                         logger.info(f"         📝 Initial trigger condition set for order {order.id}: '{trigger_condition}'")
                     else:
                         logger.debug(f"         📝 Updated trigger condition for order {order.id}: '{current_trigger}' → '{trigger_condition}'")
-            else:
-                logger.debug(f"         ✅ Trigger condition unchanged for order {order.id}: '{trigger_condition}'")
+            
+            # Update order_amount if needed
+            if amount_needs_update:
+                success = db_manager.update_order_amount(order.id, order_amount)
+                if success:
+                    if current_order_amount:
+                        logger.info(f"         💰 Updated order_amount for order {order.id}: '{current_order_amount}' → '{order_amount}'")
+                    else:
+                        logger.info(f"         💰 Set order_amount for order {order.id}: '{order_amount}'")
+                else:
+                    logger.warning(f"         ⚠️  Failed to update order_amount for order {order.id}")
+            
+            # Log if nothing changed
+            if not trigger_needs_update and not amount_needs_update:
+                logger.debug(f"         ✅ No updates needed for order {order.id}")
                 
         except Exception as e:
-            logger.error(f"Error updating single order trigger condition: {e}")
+            logger.error(f"Error updating order: {e}")
     
     def _identify_order_by_wallet_count(self, parsed_data: Dict[str, Any]) -> Optional[int]:
         """
@@ -1275,6 +1329,128 @@ class EnhancedOrderProcessor:
                 
         except Exception as e:
             logger.error(f"Error identifying order by wallet count: {e}")
+            return None
+    
+    def _match_by_order_amount(self, bullx_amount: str, unmatched_orders: List[Order]) -> Optional[Order]:
+        """
+        Match order by comparing BullX display amount with database order_amount field.
+        Allows fuzzy matching for small differences in formatting.
+        
+        Args:
+            bullx_amount: Amount displayed in BullX (e.g., "0.5", "289.55K STIMMY")
+            unmatched_orders: List of unmatched database orders
+            
+        Returns:
+            Best matching order or None if no match found
+        """
+        try:
+            if not bullx_amount or not unmatched_orders:
+                return None
+            
+            # Normalize BullX amount for comparison
+            bullx_normalized = self._normalize_amount_string(bullx_amount)
+            
+            logger.debug(f"Matching BullX amount '{bullx_amount}' (normalized: '{bullx_normalized}')")
+            
+            # Try exact match first
+            for order in unmatched_orders:
+                if order.order_amount:
+                    db_normalized = self._normalize_amount_string(order.order_amount)
+                    if bullx_normalized == db_normalized:
+                        logger.debug(f"  ✅ Exact match: Order ID {order.id}, DB amount: '{order.order_amount}'")
+                        return order
+            
+            # Try fuzzy match for numeric values
+            best_match = None
+            smallest_difference = float('inf')
+            
+            for order in unmatched_orders:
+                if not order.order_amount:
+                    continue
+                
+                # Extract numeric part for comparison
+                bullx_numeric = self._extract_numeric_value(bullx_amount)
+                db_numeric = self._extract_numeric_value(order.order_amount)
+                
+                if bullx_numeric is not None and db_numeric is not None:
+                    difference = abs(bullx_numeric - db_numeric)
+                    
+                    # Allow 1% tolerance for fuzzy matching
+                    tolerance = max(bullx_numeric * 0.01, 0.001)
+                    
+                    if difference <= tolerance and difference < smallest_difference:
+                        smallest_difference = difference
+                        best_match = order
+                        logger.debug(f"  🎯 Fuzzy match candidate: Order ID {order.id}, DB amount: '{order.order_amount}', diff: {difference}")
+            
+            if best_match:
+                logger.debug(f"  ✅ Best fuzzy match: Order ID {best_match.id}")
+                return best_match
+            
+            logger.debug(f"  ❌ No match found for amount '{bullx_amount}'")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error matching by order amount: {e}")
+            return None
+    
+    def _normalize_amount_string(self, amount_str: str) -> str:
+        """
+        Normalize amount string for comparison by removing whitespace and converting to lowercase.
+        
+        Examples:
+        - "0.5" → "0.5"
+        - "289.55K STIMMY" → "289.55kstimmy"
+        - " 0.50 " → "0.50"
+        """
+        try:
+            return amount_str.strip().lower().replace(" ", "")
+        except Exception as e:
+            logger.error(f"Error normalizing amount string '{amount_str}': {e}")
+            return ""
+    
+    def _extract_numeric_value(self, amount_str: str) -> Optional[float]:
+        """
+        Extract numeric value from amount string.
+        
+        Examples:
+        - "0.5" → 0.5
+        - "289.55K" → 289.55
+        - "289.55K STIMMY" → 289.55
+        - "1.5M" → 1500 (converts M to actual number)
+        
+        Returns:
+            Numeric value as float, or None if not parseable
+        """
+        try:
+            import re
+            
+            # Extract number and suffix (K, M, B)
+            pattern = r'([0-9]+(?:\.[0-9]+)?)(K|k|M|m|B|b)?'
+            match = re.search(pattern, amount_str)
+            
+            if not match:
+                return None
+            
+            number_str = match.group(1)
+            suffix = match.group(2)
+            
+            number = float(number_str)
+            
+            # Apply suffix multiplier (if present)
+            if suffix:
+                suffix_lower = suffix.lower()
+                if suffix_lower == 'k':
+                    number *= 1000
+                elif suffix_lower == 'm':
+                    number *= 1000000
+                elif suffix_lower == 'b':
+                    number *= 1000000000
+            
+            return number
+            
+        except Exception as e:
+            logger.error(f"Error extracting numeric value from '{amount_str}': {e}")
             return None
     
     def _verify_with_entry_price(self, bracket_sub_id: int, trigger_condition: str, bracket_entries: List[float]) -> bool:

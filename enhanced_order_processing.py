@@ -1143,38 +1143,120 @@ class EnhancedOrderProcessor:
             # STEP 2: Match remaining orders by order_amount (fulfilled orders)
             logger.info(f"      📍 STEP 2: Matching {len(coin_orders) - len(matched_orders)} remaining orders by order_amount")
             
+            # Group BullX orders by normalized order_amount to handle identical amounts
+            orders_by_amount = {}
             for order_info in coin_orders:
                 try:
                     parsed_data = order_info.get('parsed_data', {})
+                    
+                    # Skip if already matched in Step 1
+                    if any(oi is order_info for oi in matched_orders.values()):
+                        continue
+                    
                     trigger_condition = parsed_data.get('trigger_condition', '')
-                    bullx_amount = parsed_data.get('order_amount', '')  # Amount from BullX display
+                    bullx_amount = parsed_data.get('order_amount', '')
                     
                     if not trigger_condition or not bullx_amount:
                         continue
                     
-                    # Skip if THIS specific order_info has already been matched in Step 1
-                    # (use object identity, not trigger condition, since all fulfilled orders have same trigger)
-                    if any(oi is order_info for oi in matched_orders.values()):
-                        continue
+                    # Normalize amount for grouping
+                    amount_key = self._normalize_amount_string(bullx_amount)
                     
-                    # Step 2: Match by order_amount (with partial fill support)
-                    if unmatched_db_orders:
-                        matched_order = self._match_by_order_amount(bullx_amount, unmatched_db_orders, trigger_condition)
-                        if matched_order:
-                            matched_orders[matched_order.id] = order_info
-                            unmatched_db_orders.remove(matched_order)
-                            logger.info(f"         ✅ Step 2 Match: Amount '{bullx_amount}' → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
+                    if amount_key not in orders_by_amount:
+                        orders_by_amount[amount_key] = []
+                    
+                    orders_by_amount[amount_key].append(order_info)
+                    
+                except Exception as e:
+                    logger.error(f"         💥 Error grouping orders: {e}")
+            
+            # Match each group of orders
+            for amount_key, bullx_group in orders_by_amount.items():
+                try:
+                    if len(bullx_group) == 1:
+                        # Single order with this amount - match normally
+                        order_info = bullx_group[0]
+                        parsed_data = order_info.get('parsed_data', {})
+                        bullx_amount = parsed_data.get('order_amount', '')
+                        trigger_condition = parsed_data.get('trigger_condition', '')
+                        
+                        if unmatched_db_orders:
+                            matched_order = self._match_by_order_amount(bullx_amount, unmatched_db_orders, trigger_condition)
+                            if matched_order:
+                                matched_orders[matched_order.id] = order_info
+                                unmatched_db_orders.remove(matched_order)
+                                logger.info(f"         ✅ Step 2 Match: Amount '{bullx_amount}' → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
+                                
+                                # Update trigger condition AND order_amount
+                                await self._update_single_order_trigger_condition(
+                                    matched_order, 
+                                    trigger_condition, 
+                                    parsed_data.get('expiry', ''),
+                                    bullx_amount
+                                )
+                    
+                    else:
+                        # Multiple orders with same amount - use expiry-based tiebreaker
+                        logger.info(f"         🔀 Found {len(bullx_group)} orders with same amount '{bullx_group[0].get('parsed_data', {}).get('order_amount', '')}'")
+                        logger.info(f"         Using expiry-based tiebreaker (higher expiry = more recent = higher bracket)")
+                        
+                        # Sort BullX orders by expiry (descending: higher = more recent)
+                        bullx_sorted = []
+                        for order_info in bullx_group:
+                            parsed_data = order_info.get('parsed_data', {})
+                            expiry = parsed_data.get('expiry', '')
+                            expiry_seconds = self._parse_expiry_to_seconds(expiry) if expiry else 0
+                            
+                            bullx_sorted.append({
+                                'order_info': order_info,
+                                'parsed_data': parsed_data,
+                                'expiry': expiry,
+                                'expiry_seconds': expiry_seconds
+                            })
+                        
+                        bullx_sorted.sort(key=lambda x: x['expiry_seconds'], reverse=True)
+                        
+                        # Get potential DB matches for this amount
+                        bullx_amount = bullx_sorted[0]['parsed_data'].get('order_amount', '')
+                        trigger_condition = bullx_sorted[0]['parsed_data'].get('trigger_condition', '')
+                        potential_db_matches = []
+                        
+                        for order in unmatched_db_orders:
+                            if self._amounts_match(bullx_amount, order.order_amount, trigger_condition, order):
+                                potential_db_matches.append(order)
+                        
+                        # Sort DB orders by bracket_id (descending: highest first)
+                        potential_db_matches.sort(key=lambda x: x.bracket_id, reverse=True)
+                        
+                        logger.info(f"         BullX orders sorted by expiry (highest first):")
+                        for idx, bo in enumerate(bullx_sorted):
+                            logger.info(f"           {idx+1}. Expiry: {bo['expiry']} ({bo['expiry_seconds']}s)")
+                        
+                        logger.info(f"         DB orders sorted by bracket_id (highest first):")
+                        for idx, do in enumerate(potential_db_matches):
+                            logger.info(f"           {idx+1}. Order ID {do.id} (Bracket {do.bracket_id})")
+                        
+                        # Match position-wise: highest expiry → highest bracket
+                        matches_made = min(len(bullx_sorted), len(potential_db_matches))
+                        for i in range(matches_made):
+                            bullx_order = bullx_sorted[i]
+                            db_order = potential_db_matches[i]
+                            
+                            logger.info(f"         ✅ Step 2 Match: Expiry '{bullx_order['expiry']}' → Order ID {db_order.id} (Bracket {db_order.bracket_id})")
+                            
+                            matched_orders[db_order.id] = bullx_order['order_info']
+                            unmatched_db_orders.remove(db_order)
                             
                             # Update trigger condition AND order_amount
                             await self._update_single_order_trigger_condition(
-                                matched_order, 
-                                trigger_condition, 
-                                parsed_data.get('expiry', ''),
-                                parsed_data.get('order_amount', '')
+                                db_order,
+                                bullx_order['parsed_data'].get('trigger_condition', ''),
+                                bullx_order['expiry'],
+                                bullx_order['parsed_data'].get('order_amount', '')
                             )
-                        
+                
                 except Exception as e:
-                    logger.error(f"         💥 Error in Step 2 matching: {e}")
+                    logger.error(f"         💥 Error matching group: {e}")
             
             # STEP 3: Auto-deduce remaining orders
             remaining_bullx_orders = len(coin_orders) - len(matched_orders)
@@ -1454,6 +1536,58 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"Error identifying order by wallet count: {e}")
             return None
+    
+    def _amounts_match(self, bullx_amount: str, db_order_amount: str, bullx_trigger: str, order: Order) -> bool:
+        """
+        Check if a BullX amount matches a database order amount.
+        Handles exact matches, fuzzy matches, and partial fills.
+        
+        Args:
+            bullx_amount: Amount from BullX display
+            db_order_amount: Amount from database
+            bullx_trigger: BullX trigger condition
+            order: Database order being checked
+            
+        Returns:
+            True if amounts match, False otherwise
+        """
+        try:
+            if not bullx_amount or not db_order_amount:
+                return False
+            
+            # Normalize for comparison
+            bullx_normalized = self._normalize_amount_string(bullx_amount)
+            db_normalized = self._normalize_amount_string(db_order_amount)
+            
+            # Exact match
+            if bullx_normalized == db_normalized:
+                return True
+            
+            # Numeric fuzzy match
+            bullx_numeric = self._extract_numeric_value(bullx_amount)
+            db_numeric = self._extract_numeric_value(db_order_amount)
+            
+            if bullx_numeric is not None and db_numeric is not None:
+                # Standard fuzzy match
+                difference = abs(bullx_numeric - db_numeric)
+                tolerance = max(bullx_numeric * 0.01, 0.001)
+                
+                if difference <= tolerance:
+                    return True
+                
+                # Check partial fill match
+                if order.trigger_condition == "1 TP, 1 SL":
+                    partial_match = self._check_partial_fill_match(
+                        bullx_numeric, db_numeric, bullx_trigger, order
+                    )
+                    if partial_match:
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking if amounts match: {e}")
+            return False
     
     def _match_by_order_amount(self, bullx_amount: str, unmatched_orders: List[Order], bullx_trigger: str = "") -> Optional[Order]:
         """

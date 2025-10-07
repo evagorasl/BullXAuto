@@ -518,12 +518,59 @@ class EnhancedOrderProcessor:
             logger.error(f"Error parsing row data: {e}")
             return None
     
+    def _check_trigger_condition_type(self, trigger_condition: str) -> Dict[str, bool]:
+        """
+        Analyze trigger condition and return what types it contains.
+        Uses regex patterns to avoid false positives.
+        
+        Args:
+            trigger_condition: The trigger condition string from BullX
+            
+        Returns:
+            Dict with keys: 'has_tp_only', 'has_sl_only', 'has_both', 'has_entry'
+            
+        Examples:
+            "1 TP" → {'has_tp_only': True, 'has_sl_only': False, 'has_both': False}
+            "1 TP," → {'has_tp_only': True, 'has_sl_only': False, 'has_both': False}
+            "1 SL" → {'has_tp_only': False, 'has_sl_only': True, 'has_both': False}
+            "1 TP, 1 SL" → {'has_tp_only': False, 'has_sl_only': False, 'has_both': True}
+            "Buy below $231K" → {'has_entry': True}
+        """
+        import re
+        
+        if not trigger_condition:
+            return {'has_tp_only': False, 'has_sl_only': False, 'has_both': False, 'has_entry': False}
+        
+        trigger = trigger_condition.strip()
+        
+        # Pattern for "Buy below" entry conditions
+        has_entry = bool(re.search(r'Buy\s+below', trigger, re.IGNORECASE))
+        
+        # Pattern to detect "1 TP, 1 SL" (both present)
+        has_both = bool(re.search(r'1\s*TP.*1\s*SL', trigger, re.IGNORECASE))
+        
+        # Pattern to detect ONLY "1 TP" (not followed by "1 SL")
+        # Matches: "1 TP", "1 TP,", "1TP", but NOT "1 TP, 1 SL"
+        has_tp_only = bool(re.search(r'1\s*TP(?!\s*,\s*1\s*SL)', trigger, re.IGNORECASE)) and not has_both
+        
+        # Pattern to detect ONLY "1 SL" (not preceded by "1 TP")
+        # Matches: "1 SL", "1 SL,", "1SL", but NOT "1 TP, 1 SL"
+        has_sl_only = bool(re.search(r'(?<!1\s*TP,\s*)1\s*SL', trigger, re.IGNORECASE)) and not has_both
+        
+        return {
+            'has_tp_only': has_tp_only,
+            'has_sl_only': has_sl_only,
+            'has_both': has_both,
+            'has_entry': has_entry
+        }
+    
     def _is_tp_condition(self, trigger_condition: str) -> bool:
         """
         Check if trigger condition indicates TP has been met.
-        According to requirements: trigger conditions = "1 SL" means TP has been met.
+        According to requirements: trigger conditions = "1 SL" (only SL remains) means TP has been met.
         """
-        return trigger_condition.strip() == "1 SL"
+        trigger_type = self._check_trigger_condition_type(trigger_condition)
+        return trigger_type['has_sl_only']
     
     def _parse_trigger_condition_entry_price(self, trigger_condition: str) -> Optional[float]:
         """
@@ -942,6 +989,7 @@ class EnhancedOrderProcessor:
     def _is_bullx_automation_refresh(self, old_trigger: str, new_trigger: str) -> bool:
         """
         Detect if this is a BullX automation refresh (entry → TP/SL transition).
+        Uses pattern-based trigger type detection for robust matching.
         
         Args:
             old_trigger: Previous trigger condition from database
@@ -954,11 +1002,12 @@ class EnhancedOrderProcessor:
             if not old_trigger or not new_trigger:
                 return False
             
-            # Check if old trigger was an entry condition
-            is_old_entry = "Buy below" in old_trigger
+            old_type = self._check_trigger_condition_type(old_trigger)
+            new_type = self._check_trigger_condition_type(new_trigger)
             
-            # Check if new trigger is a TP/SL condition
-            is_new_tp_sl = new_trigger in ["1 TP, 1 SL", "1 TP", "1 SL"]
+            # Entry → TP/SL transition
+            is_old_entry = old_type['has_entry']
+            is_new_tp_sl = (new_type['has_tp_only'] or new_type['has_sl_only'] or new_type['has_both'])
             
             return is_old_entry and is_new_tp_sl
             
@@ -1503,8 +1552,8 @@ class EnhancedOrderProcessor:
         
         Logic:
         - Original amount is split: TP portion (db_amount / 1.9) + SL portion (db_amount / 1.9)
-        - If "1 SL" trigger: Only SL remains = db_amount / 1.9
-        - If "1 TP" trigger: Only TP remains = db_amount - (db_amount / 1.9)
+        - If ONLY "1 SL" trigger: Only SL remains = db_amount / 1.9
+        - If ONLY "1 TP" trigger: Only TP remains = db_amount - (db_amount / 1.9)
         
         Args:
             bullx_numeric: Numeric value from BullX display
@@ -1520,10 +1569,12 @@ class EnhancedOrderProcessor:
             if order.trigger_condition != "1 TP, 1 SL":
                 return None
             
+            # Use pattern-based trigger type detection
+            trigger_type = self._check_trigger_condition_type(bullx_trigger)
             tolerance_percent = 0.05  # 5% tolerance for matching
             
-            # Case 1: "1 SL" trigger - TP has been hit, only SL remains
-            if "1 SL" in bullx_trigger:
+            # Case 1: Only SL remains (TP was hit)
+            if trigger_type['has_sl_only']:
                 expected_amount = db_numeric / 1.9  # SL portion
                 difference = abs(bullx_numeric - expected_amount)
                 tolerance = expected_amount * tolerance_percent
@@ -1535,8 +1586,8 @@ class EnhancedOrderProcessor:
                         'difference': difference
                     }
             
-            # Case 2: "1 TP" trigger - SL has been hit, only TP remains
-            elif "1 TP" in bullx_trigger:
+            # Case 2: Only TP remains (SL was hit)
+            elif trigger_type['has_tp_only']:
                 expected_amount = db_numeric - (db_numeric / 1.9)  # TP portion
                 difference = abs(bullx_numeric - expected_amount)
                 tolerance = expected_amount * tolerance_percent

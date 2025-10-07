@@ -19,6 +19,9 @@ TRADE_SIZES = [1/3, 1/3, 1/6, 1/6]  # bracket_id 1, 2, 3, 4
 # Take profit percentages for each bracket_id
 TAKE_PROFIT_PERCENTAGES = [1.12, 0.89, 0.81, 0.56]  # 112%, 89%, 81%, 56%
 
+# Stop loss percentages for each bracket_id
+STOP_LOSS_PERCENTAGES = [-0.1622, -0.4046, -0.6623,-0.7744]
+
 # Bracket-specific configurations
 BRACKET_CONFIG = {
     1: {

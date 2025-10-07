@@ -1107,14 +1107,14 @@ class EnhancedOrderProcessor:
                     if not trigger_condition or not bullx_amount:
                         continue
                     
-                    # Skip if already matched in Step 1
-                    if any(oi.get('parsed_data', {}).get('trigger_condition') == trigger_condition 
-                           for oi in matched_orders.values()):
+                    # Skip if THIS specific order_info has already been matched in Step 1
+                    # (use object identity, not trigger condition, since all fulfilled orders have same trigger)
+                    if any(oi is order_info for oi in matched_orders.values()):
                         continue
                     
-                    # Step 2: Match by order_amount
+                    # Step 2: Match by order_amount (with partial fill support)
                     if unmatched_db_orders:
-                        matched_order = self._match_by_order_amount(bullx_amount, unmatched_db_orders)
+                        matched_order = self._match_by_order_amount(bullx_amount, unmatched_db_orders, trigger_condition)
                         if matched_order:
                             matched_orders[matched_order.id] = order_info
                             unmatched_db_orders.remove(matched_order)
@@ -1410,14 +1410,16 @@ class EnhancedOrderProcessor:
             logger.error(f"Error identifying order by wallet count: {e}")
             return None
     
-    def _match_by_order_amount(self, bullx_amount: str, unmatched_orders: List[Order]) -> Optional[Order]:
+    def _match_by_order_amount(self, bullx_amount: str, unmatched_orders: List[Order], bullx_trigger: str = "") -> Optional[Order]:
         """
         Match order by comparing BullX display amount with database order_amount field.
         Allows fuzzy matching for small differences in formatting.
+        Enhanced to handle partial fills when TP or SL has been hit.
         
         Args:
             bullx_amount: Amount displayed in BullX (e.g., "0.5", "289.55K STIMMY")
             unmatched_orders: List of unmatched database orders
+            bullx_trigger: BullX trigger condition (e.g., "1 SL", "1 TP", "1 TP, 1 SL")
             
         Returns:
             Best matching order or None if no match found
@@ -1428,8 +1430,10 @@ class EnhancedOrderProcessor:
             
             # Normalize BullX amount for comparison
             bullx_normalized = self._normalize_amount_string(bullx_amount)
+            bullx_numeric = self._extract_numeric_value(bullx_amount)
             
-            logger.debug(f"Matching BullX amount '{bullx_amount}' (normalized: '{bullx_normalized}')")
+            logger.debug(f"Matching BullX amount '{bullx_amount}' (normalized: '{bullx_normalized}', numeric: {bullx_numeric})")
+            logger.debug(f"  BullX trigger: '{bullx_trigger}'")
             
             # Try exact match first
             for order in unmatched_orders:
@@ -1439,7 +1443,7 @@ class EnhancedOrderProcessor:
                         logger.debug(f"  ✅ Exact match: Order ID {order.id}, DB amount: '{order.order_amount}'")
                         return order
             
-            # Try fuzzy match for numeric values
+            # Try fuzzy match for numeric values (including partial fill logic)
             best_match = None
             smallest_difference = float('inf')
             
@@ -1447,23 +1451,34 @@ class EnhancedOrderProcessor:
                 if not order.order_amount:
                     continue
                 
-                # Extract numeric part for comparison
-                bullx_numeric = self._extract_numeric_value(bullx_amount)
                 db_numeric = self._extract_numeric_value(order.order_amount)
                 
                 if bullx_numeric is not None and db_numeric is not None:
+                    # Standard fuzzy match
                     difference = abs(bullx_numeric - db_numeric)
-                    
-                    # Allow 1% tolerance for fuzzy matching
                     tolerance = max(bullx_numeric * 0.01, 0.001)
                     
                     if difference <= tolerance and difference < smallest_difference:
                         smallest_difference = difference
                         best_match = order
                         logger.debug(f"  🎯 Fuzzy match candidate: Order ID {order.id}, DB amount: '{order.order_amount}', diff: {difference}")
+                    
+                    # Enhanced: Check for partial fills if DB order has "1 TP, 1 SL" trigger
+                    if order.trigger_condition == "1 TP, 1 SL":
+                        partial_match = self._check_partial_fill_match(
+                            bullx_numeric, db_numeric, bullx_trigger, order
+                        )
+                        
+                        if partial_match:
+                            difference = partial_match['difference']
+                            if difference < smallest_difference:
+                                smallest_difference = difference
+                                best_match = order
+                                logger.debug(f"  🎯 Partial fill match: {partial_match['type']}")
+                                logger.debug(f"     Order ID {order.id}, expected: {partial_match['expected_amount']:.4f}, actual: {bullx_numeric:.4f}")
             
             if best_match:
-                logger.debug(f"  ✅ Best fuzzy match: Order ID {best_match.id}")
+                logger.debug(f"  ✅ Best match: Order ID {best_match.id}")
                 return best_match
             
             logger.debug(f"  ❌ No match found for amount '{bullx_amount}'")
@@ -1471,6 +1486,63 @@ class EnhancedOrderProcessor:
             
         except Exception as e:
             logger.error(f"Error matching by order amount: {e}")
+            return None
+    
+    def _check_partial_fill_match(self, bullx_numeric: float, db_numeric: float, bullx_trigger: str, order: Order) -> Optional[Dict]:
+        """
+        Check if BullX amount matches a partial fill scenario (TP or SL hit).
+        
+        Logic:
+        - Original amount is split: TP portion (db_amount / 1.9) + SL portion (db_amount / 1.9)
+        - If "1 SL" trigger: Only SL remains = db_amount / 1.9
+        - If "1 TP" trigger: Only TP remains = db_amount - (db_amount / 1.9)
+        
+        Args:
+            bullx_numeric: Numeric value from BullX display
+            db_numeric: Numeric value from database order_amount
+            bullx_trigger: BullX trigger condition
+            order: Database order being checked
+            
+        Returns:
+            Match info dict if partial fill detected, None otherwise
+        """
+        try:
+            # Only check for orders with "1 TP, 1 SL" in database
+            if order.trigger_condition != "1 TP, 1 SL":
+                return None
+            
+            tolerance_percent = 0.05  # 5% tolerance for matching
+            
+            # Case 1: "1 SL" trigger - TP has been hit, only SL remains
+            if bullx_trigger == "1 SL":
+                expected_amount = db_numeric / 1.9  # SL portion
+                difference = abs(bullx_numeric - expected_amount)
+                tolerance = expected_amount * tolerance_percent
+                
+                if difference <= tolerance:
+                    return {
+                        'type': 'SL_only (TP hit)',
+                        'expected_amount': expected_amount,
+                        'difference': difference
+                    }
+            
+            # Case 2: "1 TP" trigger - SL has been hit, only TP remains
+            elif bullx_trigger == "1 TP":
+                expected_amount = db_numeric - (db_numeric / 1.9)  # TP portion
+                difference = abs(bullx_numeric - expected_amount)
+                tolerance = expected_amount * tolerance_percent
+                
+                if difference <= tolerance:
+                    return {
+                        'type': 'TP_only (SL hit)',
+                        'expected_amount': expected_amount,
+                        'difference': difference
+                    }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error checking partial fill match: {e}")
             return None
     
     def _normalize_amount_string(self, amount_str: str) -> str:

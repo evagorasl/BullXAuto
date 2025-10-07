@@ -60,11 +60,13 @@ else:
 
 ### Trade Size Distribution
 
-Orders are distributed across 4 bracket IDs with the following default percentages:
-- Bracket ID 1: 33.33% of total amount
-- Bracket ID 2: 33.33% of total amount  
-- Bracket ID 3: 16.67% of total amount
-- Bracket ID 4: 16.67% of total amount
+Orders are distributed across 4 bracket IDs with distinct percentages for easier order identification:
+- Bracket ID 1: 34.48% of total amount (1/2.9)
+- Bracket ID 2: 32.26% of total amount (1/3.1)
+- Bracket ID 3: 16.95% of total amount (1/5.9)
+- Bracket ID 4: 16.39% of total amount (1/6.1)
+
+**Note:** Each bracket uses a unique trade size, making it easier to identify which bracket an order belongs to based on its order_amount.
 
 ### Auto-Sell Strategy Naming
 
@@ -86,7 +88,7 @@ Execute complete bracket strategy for a token (places all 4 orders).
 **Parameters:**
 - `address` (string): Token contract address
 - `total_amount` (float): Total investment amount to distribute
-- `strategy_number` (int, optional): Strategy number (default: 1)
+- `bracket` (int, optional): Bracket override (1-5). If not provided, auto-calculates from market cap
 
 **Response:**
 ```json
@@ -112,7 +114,8 @@ Replace a specific bracket order with a new one.
 - `address` (string): Token contract address
 - `bracket_id` (int): Bracket ID to replace (1-4)
 - `new_amount` (float): New order amount
-- `strategy_number` (int, optional): Strategy number (default: 1)
+
+**Note:** The original bracket is preserved automatically during replacement.
 
 ### Preview Bracket Orders
 **GET** `/api/v1/bracket-preview/{address}?total_amount={amount}`
@@ -214,7 +217,7 @@ BRACKET_RANGES = {
 }
 
 # Trade sizes for each bracket_id
-TRADE_SIZES = [0.3333, 0.3333, 0.1667, 0.1667]
+TRADE_SIZES = [0.3448, 0.3226, 0.1695, 0.1639]  # Distinct sizes for easier order identification
 
 # Take profit percentages for each bracket_id
 TAKE_PROFIT_PERCENTAGES = [1.12, 0.89, 0.81, 0.56]

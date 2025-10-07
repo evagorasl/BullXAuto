@@ -544,7 +544,7 @@ async def get_bracket_config(current_profile: Profile = Depends(get_current_prof
 async def execute_bracket_strategy(
     address: str,
     total_amount: float,
-    strategy_number: int = 1,
+    bracket: Optional[int] = None,
     current_profile: Profile = Depends(get_current_profile)
 ):
     """Execute complete bracket strategy for a coin - places all 4 bracket orders"""
@@ -555,12 +555,16 @@ async def execute_bracket_strategy(
         if total_amount <= 0:
             raise HTTPException(status_code=400, detail="Total amount must be greater than 0")
         
+        # Validate bracket if provided
+        if bracket is not None and bracket not in [1, 2, 3, 4, 5]:
+            raise HTTPException(status_code=400, detail="Bracket must be between 1 and 5")
+        
         # Execute bracket strategy
         result = bracket_order_manager.execute_bracket_strategy(
             profile_name=current_profile.name,
             address=address,
             total_amount=total_amount,
-            strategy_number=strategy_number
+            bracket=bracket
         )
         
         if result["success"]:
@@ -588,7 +592,6 @@ async def replace_bracket_order(
     address: str,
     bracket_id: int,
     new_amount: float,
-    strategy_number: int = 1,
     current_profile: Profile = Depends(get_current_profile)
 ):
     """Replace a specific bracket order with a new one"""
@@ -603,13 +606,12 @@ async def replace_bracket_order(
         if new_amount <= 0:
             raise HTTPException(status_code=400, detail="Amount must be greater than 0")
         
-        # Replace bracket order
+        # Replace bracket order (original_bracket is handled internally by the manager)
         result = bracket_order_manager.replace_order(
             profile_name=current_profile.name,
             address=address,
             bracket_id=bracket_id,
-            new_amount=new_amount,
-            strategy_number=strategy_number
+            new_amount=new_amount
         )
         
         if result["success"]:

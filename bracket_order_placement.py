@@ -34,7 +34,7 @@ class BracketOrderPlacer:
         self.driver_manager = bullx_automator.driver_manager
     
     def place_bracket_orders(self, profile_name: str, address: str, total_amount: float, 
-                           strategy_number: int = 1) -> Dict:
+                           bracket: Optional[int] = None) -> Dict:
         """
         Place all four bracket orders for a coin based on its market cap bracket.
         
@@ -42,7 +42,7 @@ class BracketOrderPlacer:
             profile_name: Chrome profile name
             address: Token contract address
             total_amount: Total investment amount to split across orders
-            strategy_number: Strategy number for tracking
+            bracket: Optional bracket override (1-5). If None, auto-calculate from market cap
             
         Returns:
             Dict with success status and order details
@@ -64,8 +64,16 @@ class BracketOrderPlacer:
             if current_market_cap <= 0:
                 return {"success": False, "error": "Failed to get market cap"}
             
-            # Calculate bracket and ensure coin data includes bracket and current market cap
-            bracket = calculate_bracket(current_market_cap)
+            # Use provided bracket or calculate from market cap
+            if bracket is not None:
+                # Validate provided bracket
+                if bracket not in BRACKET_CONFIG:
+                    return {"success": False, "error": f"Invalid bracket {bracket}. Must be 1-5."}
+                logger.info(f"Using user-provided bracket {bracket}")
+            else:
+                # Calculate bracket from market cap
+                bracket = calculate_bracket(current_market_cap)
+                logger.info(f"Auto-calculated bracket {bracket} from market cap ${current_market_cap:,.0f}")
             
             # Update coin data with bracket and current market cap
             if coin_data:
@@ -105,8 +113,7 @@ class BracketOrderPlacer:
                         entry_market_cap=order_param["entry_price"],  # Using market cap as entry target
                         take_profit_market_cap=order_param["take_profit"],
                         stop_loss_market_cap=order_param["stop_loss"],
-                        amount=order_param["amount"],
-                        strategy_number=strategy_number
+                        amount=order_param["amount"]
                     )
                     
                     if order_result["success"]:
@@ -141,8 +148,7 @@ class BracketOrderPlacer:
     def _place_single_bracket_order(self, profile_name: str, address: str, bracket: int,
                                   bracket_id: int, current_market_cap: float,
                                   entry_market_cap: float, take_profit_market_cap: float,
-                                  stop_loss_market_cap: float, amount: float,
-                                  strategy_number: int) -> Dict:
+                                  stop_loss_market_cap: float, amount: float) -> Dict:
         """
         Place a single bracket order.
         
@@ -156,7 +162,6 @@ class BracketOrderPlacer:
             take_profit_market_cap: Take profit market cap target
             stop_loss_market_cap: Stop loss market cap target
             amount: Order amount
-            strategy_number: Strategy number
             
         Returns:
             Dict with success status and order details
@@ -219,7 +224,7 @@ class BracketOrderPlacer:
             
             # Save order to database
             order_data = {
-                "strategy_number": strategy_number,
+                "strategy_number": 1,  # Default value for legacy compatibility
                 "order_type": "BUY",
                 "market_cap": current_market_cap,
                 "entry_price": entry_market_cap,
@@ -770,8 +775,7 @@ class BracketOrderPlacer:
             return None
     
     def replace_bracket_order(self, profile_name: str, address: str, bracket_id: int,
-                            new_amount: float, strategy_number: int = 1, 
-                            original_bracket: int = None) -> Dict:
+                            new_amount: float, original_bracket: int = None) -> Dict:
         """
         Replace a specific bracket order with a new one.
         
@@ -780,7 +784,6 @@ class BracketOrderPlacer:
             address: Token contract address
             bracket_id: Bracket ID to replace (1-4)
             new_amount: New order amount
-            strategy_number: Strategy number
             original_bracket: Original bracket to use (preserves bracket consistency)
             
         Returns:
@@ -821,8 +824,7 @@ class BracketOrderPlacer:
                 entry_market_cap=entry_market_cap,
                 take_profit_market_cap=take_profit_market_cap,
                 stop_loss_market_cap=stop_loss_market_cap,
-                amount=new_amount,
-                strategy_number=strategy_number
+                amount=new_amount
             )
             
             return order_result
@@ -843,31 +845,42 @@ class BracketOrderManager:
         self.order_placer = BracketOrderPlacer(bullx_automator)
     
     def execute_bracket_strategy(self, profile_name: str, address: str, 
-                                total_amount: float, strategy_number: int = 1) -> Dict:
+                                total_amount: float, bracket: Optional[int] = None) -> Dict:
         """
         Execute complete bracket strategy for a coin.
         
         This is the main entry point for placing bracket orders.
+        
+        Args:
+            profile_name: Chrome profile name
+            address: Token contract address
+            total_amount: Total investment amount
+            bracket: Optional bracket override (1-5). If None, auto-calculate from market cap
         """
         return self.order_placer.place_bracket_orders(
             profile_name=profile_name,
             address=address,
             total_amount=total_amount,
-            strategy_number=strategy_number
+            bracket=bracket
         )
     
     def replace_order(self, profile_name: str, address: str, bracket_id: int,
-                     new_amount: float, strategy_number: int = 1, 
-                     original_bracket: int = None) -> Dict:
+                     new_amount: float, original_bracket: int = None) -> Dict:
         """
         Replace a specific bracket order.
+        
+        Args:
+            profile_name: Chrome profile name
+            address: Token contract address
+            bracket_id: Bracket ID to replace (1-4)
+            new_amount: New order amount
+            original_bracket: Original bracket to use (preserves bracket consistency)
         """
         return self.order_placer.replace_bracket_order(
             profile_name=profile_name,
             address=address,
             bracket_id=bracket_id,
             new_amount=new_amount,
-            strategy_number=strategy_number,
             original_bracket=original_bracket
         )
     

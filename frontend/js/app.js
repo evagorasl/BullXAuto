@@ -798,7 +798,8 @@ async function handlePreviewBracket() {
 async function handleExecuteBracket() {
     const address = document.getElementById('bracket-address').value.trim();
     const amount = parseFloat(document.getElementById('bracket-amount').value);
-    const strategyNumber = parseInt(document.getElementById('bracket-strategy-number').value);
+    const bracketSelect = document.getElementById('bracket-select').value;
+    const bracket = bracketSelect ? parseInt(bracketSelect) : null;
     
     if (!address) {
         showBracketMessage('Please enter a token address', 'error');

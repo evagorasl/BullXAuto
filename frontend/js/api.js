@@ -233,12 +233,14 @@ class BullXAPI {
      * @param {number} strategyNumber - Strategy number (optional, default: 1)
      * @returns {Promise} - Promise that resolves to the bracket strategy result
      */
-    async executeBracketStrategy(address, totalAmount, strategyNumber = 1) {
+    async executeBracketStrategy(address, totalAmount, bracket = null) {
         const params = new URLSearchParams({
             address,
-            total_amount: totalAmount,
-            strategy_number: strategyNumber
+            total_amount: totalAmount
         });
+        if (bracket !== null) {
+            params.set('bracket', bracket);
+        }
         return this.request('POST', `/api/v1/bracket-strategy?${params}`);
     }
 
@@ -250,10 +252,9 @@ class BullXAPI {
      * @param {number} strategyNumber - Strategy number (optional, default: 1)
      * @returns {Promise} - Promise that resolves to the replacement result
      */
-    async replaceBracketOrder(address, bracketId, newAmount, strategyNumber = 1) {
+    async replaceBracketOrder(address, bracketId, newAmount) {
         const params = new URLSearchParams({
-            new_amount: newAmount,
-            strategy_number: strategyNumber
+            new_amount: newAmount
         });
         return this.request('POST', `/api/v1/bracket-order-replace/${address}/${bracketId}?${params}`);
     }

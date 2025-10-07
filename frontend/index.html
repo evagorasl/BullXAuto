@@ -76,12 +76,16 @@
                     </div>
 
                     <div class="form-group">
-                        <label for="bracket-strategy-number">Strategy Number</label>
-                        <select id="bracket-strategy-number">
-                            <option value="1">Strategy 1</option>
-                            <option value="2">Strategy 2</option>
-                            <option value="3">Strategy 3</option>
+                        <label for="bracket-select">Bracket (Optional)</label>
+                        <select id="bracket-select">
+                            <option value="">Auto (Based on Market Cap)</option>
+                            <option value="1">Bracket 1 - Micro Cap ($20K - $200K)</option>
+                            <option value="2">Bracket 2 - Small Cap ($200K - $2M)</option>
+                            <option value="3">Bracket 3 - Medium Cap ($2M - $20M)</option>
+                            <option value="4">Bracket 4 - Large Cap ($20M - $120M)</option>
+                            <option value="5">Bracket 5 - Mega Cap ($120M - $1.2B)</option>
                         </select>
+                        <small class="form-help">Leave as "Auto" to calculate bracket from market cap, or manually select a bracket.</small>
                     </div>
 
                     <div class="button-group">

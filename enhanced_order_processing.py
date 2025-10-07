@@ -1432,8 +1432,10 @@ class EnhancedOrderProcessor:
             bullx_normalized = self._normalize_amount_string(bullx_amount)
             bullx_numeric = self._extract_numeric_value(bullx_amount)
             
-            logger.debug(f"Matching BullX amount '{bullx_amount}' (normalized: '{bullx_normalized}', numeric: {bullx_numeric})")
-            logger.debug(f"  BullX trigger: '{bullx_trigger}'")
+            logger.info(f"         🔍 Matching BullX amount '{bullx_amount}':")
+            logger.info(f"            Normalized: '{bullx_normalized}', Numeric: {bullx_numeric}")
+            logger.info(f"            BullX trigger: '{bullx_trigger}'")
+            logger.info(f"            Unmatched orders: {len(unmatched_orders)}")
             
             # Try exact match first
             for order in unmatched_orders:
@@ -1464,18 +1466,25 @@ class EnhancedOrderProcessor:
                         logger.debug(f"  🎯 Fuzzy match candidate: Order ID {order.id}, DB amount: '{order.order_amount}', diff: {difference}")
                     
                     # Enhanced: Check for partial fills if DB order has "1 TP, 1 SL" trigger
+                    logger.info(f"            Checking Order ID {order.id}: DB trigger='{order.trigger_condition}', DB amount={db_numeric}")
                     if order.trigger_condition == "1 TP, 1 SL":
+                        logger.info(f"            → Order has '1 TP, 1 SL' trigger, checking partial fill match...")
                         partial_match = self._check_partial_fill_match(
                             bullx_numeric, db_numeric, bullx_trigger, order
                         )
                         
                         if partial_match:
                             difference = partial_match['difference']
+                            logger.info(f"            ✅ Partial fill detected: {partial_match['type']}")
+                            logger.info(f"               Expected: {partial_match['expected_amount']:.2f}, Actual: {bullx_numeric:.2f}, Diff: {difference:.2f}")
                             if difference < smallest_difference:
                                 smallest_difference = difference
                                 best_match = order
-                                logger.debug(f"  🎯 Partial fill match: {partial_match['type']}")
-                                logger.debug(f"     Order ID {order.id}, expected: {partial_match['expected_amount']:.4f}, actual: {bullx_numeric:.4f}")
+                                logger.info(f"               → New best match (smallest difference)")
+                        else:
+                            logger.info(f"            ❌ No partial fill match found")
+                    else:
+                        logger.debug(f"            → Order trigger is '{order.trigger_condition}', not '1 TP, 1 SL', skipping partial fill check")
             
             if best_match:
                 logger.debug(f"  ✅ Best match: Order ID {best_match.id}")
@@ -1514,7 +1523,7 @@ class EnhancedOrderProcessor:
             tolerance_percent = 0.05  # 5% tolerance for matching
             
             # Case 1: "1 SL" trigger - TP has been hit, only SL remains
-            if bullx_trigger == "1 SL":
+            if "1 SL" in bullx_trigger:
                 expected_amount = db_numeric / 1.9  # SL portion
                 difference = abs(bullx_numeric - expected_amount)
                 tolerance = expected_amount * tolerance_percent
@@ -1527,7 +1536,7 @@ class EnhancedOrderProcessor:
                     }
             
             # Case 2: "1 TP" trigger - SL has been hit, only TP remains
-            elif bullx_trigger == "1 TP":
+            elif "1 TP" in bullx_trigger:
                 expected_amount = db_numeric - (db_numeric / 1.9)  # TP portion
                 difference = abs(bullx_numeric - expected_amount)
                 tolerance = expected_amount * tolerance_percent

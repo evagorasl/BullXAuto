@@ -622,7 +622,7 @@ class BracketOrderPlacer:
             
             # Wait for order confirmation or success message
             try:
-                WebDriverWait(driver, 5).until(
+                WebDriverWait(driver, 2).until(
                     EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'success') or contains(text(), 'completed') or contains(@class, 'success')]"))
                 )
                 logger.info("Order placed successfully")

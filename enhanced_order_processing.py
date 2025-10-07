@@ -521,7 +521,7 @@ class EnhancedOrderProcessor:
     def _check_trigger_condition_type(self, trigger_condition: str) -> Dict[str, bool]:
         """
         Analyze trigger condition and return what types it contains.
-        Uses regex patterns to avoid false positives.
+        Uses simple string matching to avoid regex complexity.
         
         Args:
             trigger_condition: The trigger condition string from BullX
@@ -536,26 +536,22 @@ class EnhancedOrderProcessor:
             "1 TP, 1 SL" → {'has_tp_only': False, 'has_sl_only': False, 'has_both': True}
             "Buy below $231K" → {'has_entry': True}
         """
-        import re
-        
         if not trigger_condition:
             return {'has_tp_only': False, 'has_sl_only': False, 'has_both': False, 'has_entry': False}
         
-        trigger = trigger_condition.strip()
+        # Strip whitespace and remove trailing comma if present
+        trigger = trigger_condition.strip().rstrip(',').strip()
         
-        # Pattern for "Buy below" entry conditions
-        has_entry = bool(re.search(r'Buy\s+below', trigger, re.IGNORECASE))
+        # Check for entry conditions
+        has_entry = "Buy below" in trigger
         
-        # Pattern to detect "1 TP, 1 SL" (both present)
-        has_both = bool(re.search(r'1\s*TP.*1\s*SL', trigger, re.IGNORECASE))
+        # Simple string matching for TP/SL conditions
+        # Check for both first (most specific)
+        has_both = ("1 TP" in trigger and "1 SL" in trigger)
         
-        # Pattern to detect ONLY "1 TP" (not followed by "1 SL")
-        # Matches: "1 TP", "1 TP,", "1TP", but NOT "1 TP, 1 SL"
-        has_tp_only = bool(re.search(r'1\s*TP(?!\s*,\s*1\s*SL)', trigger, re.IGNORECASE)) and not has_both
-        
-        # Pattern to detect ONLY "1 SL" (not preceded by "1 TP")
-        # Matches: "1 SL", "1 SL,", "1SL", but NOT "1 TP, 1 SL"
-        has_sl_only = bool(re.search(r'(?<!1\s*TP,\s*)1\s*SL', trigger, re.IGNORECASE)) and not has_both
+        # Then check for individual ones (only if not both)
+        has_tp_only = ("1 TP" in trigger and not has_both)
+        has_sl_only = ("1 SL" in trigger and not has_both)
         
         return {
             'has_tp_only': has_tp_only,

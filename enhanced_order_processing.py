@@ -1131,35 +1131,114 @@ class EnhancedOrderProcessor:
                 except Exception as e:
                     logger.error(f"         💥 Error in Step 2 matching: {e}")
             
-            # STEP 3: Auto-deduce single remaining order
+            # STEP 3: Auto-deduce remaining orders
             remaining_bullx_orders = len(coin_orders) - len(matched_orders)
-            if remaining_bullx_orders > 0 and len(unmatched_db_orders) == 1:
-                logger.info(f"      📍 STEP 3: Auto-deducing single remaining order")
+            if remaining_bullx_orders > 0 and len(unmatched_db_orders) > 0:
+                logger.info(f"      📍 STEP 3: Auto-deducing {remaining_bullx_orders} remaining order(s)")
+                logger.info(f"         Remaining BullX orders: {remaining_bullx_orders}")
+                logger.info(f"         Unmatched DB orders: {len(unmatched_db_orders)}")
                 
-                # Find the unmatched BullX order
-                for order_info in coin_orders:
-                    parsed_data = order_info.get('parsed_data', {})
-                    trigger_condition = parsed_data.get('trigger_condition', '')
+                # Collect all unmatched BullX orders
+                unmatched_bullx_orders = []
+                for i, order_info in enumerate(coin_orders):
+                    try:
+                        parsed_data = order_info.get('parsed_data', {})
+                        trigger_condition = parsed_data.get('trigger_condition', '')
+                        order_amount = parsed_data.get('order_amount', '')
+                        
+                        # Check if THIS specific order_info has already been matched
+                        # (not just if the trigger condition matches, since all fulfilled orders have same trigger)
+                        is_already_matched = any(oi is order_info for oi in matched_orders.values())
+                        
+                        if is_already_matched:
+                            continue
+                        
+                        # Extract numeric value for sorting
+                        numeric_amount = self._extract_numeric_value(order_amount) if order_amount else None
+                        
+                        unmatched_bullx_orders.append({
+                            'order_info': order_info,
+                            'parsed_data': parsed_data,
+                            'trigger_condition': trigger_condition,
+                            'order_amount': order_amount,
+                            'numeric_amount': numeric_amount
+                        })
+                        
+                    except Exception as e:
+                        logger.error(f"         💥 Error collecting unmatched order {i+1}: {e}")
+                
+                if not unmatched_bullx_orders:
+                    logger.warning(f"         ⚠️  Could not find any unmatched BullX orders")
+                else:
+                    logger.info(f"         Found {len(unmatched_bullx_orders)} unmatched BullX orders")
                     
-                    # Skip if already matched
-                    if any(oi.get('parsed_data', {}).get('trigger_condition') == trigger_condition 
-                           for oi in matched_orders.values()):
-                        continue
+                    # Case 1: Single remaining order - simple auto-deduce
+                    if len(unmatched_bullx_orders) == 1 and len(unmatched_db_orders) == 1:
+                        logger.info(f"         Case 1: Single order auto-deduction")
+                        
+                        bullx_order = unmatched_bullx_orders[0]
+                        matched_order = unmatched_db_orders[0]
+                        
+                        logger.info(f"         ✅ Step 3 Match: Auto-deduced → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
+                        logger.info(f"            BullX: Trigger='{bullx_order['trigger_condition']}', Amount='{bullx_order['order_amount']}'")
+                        
+                        matched_orders[matched_order.id] = bullx_order['order_info']
+                        unmatched_db_orders.remove(matched_order)
+                        
+                        # Update trigger condition AND order_amount
+                        await self._update_single_order_trigger_condition(
+                            matched_order, 
+                            bullx_order['trigger_condition'], 
+                            bullx_order['parsed_data'].get('expiry', ''),
+                            bullx_order['order_amount']
+                        )
                     
-                    # Auto-deduce: only one DB order and one BullX order remain
-                    matched_order = unmatched_db_orders[0]
-                    matched_orders[matched_order.id] = order_info
-                    unmatched_db_orders.remove(matched_order)
-                    logger.info(f"         ✅ Step 3 Match: Auto-deduced → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
+                    # Case 2: Multiple remaining orders - match by order_amount heuristic
+                    elif len(unmatched_bullx_orders) > 1 and len(unmatched_db_orders) > 1:
+                        logger.info(f"         Case 2: Multiple orders - using order_amount heuristic")
+                        logger.info(f"            Logic: Smallest amount → Highest bracket sub_id (since entries are ascending)")
+                        
+                        # Sort BullX orders by numeric amount (ascending: smallest first)
+                        bullx_sorted = sorted(
+                            [o for o in unmatched_bullx_orders if o['numeric_amount'] is not None],
+                            key=lambda x: x['numeric_amount']
+                        )
+                        
+                        # Sort DB orders by bracket_id (descending: highest first)
+                        db_sorted = sorted(unmatched_db_orders, key=lambda x: x.bracket_id, reverse=True)
+                        
+                        logger.info(f"            BullX orders sorted by amount (smallest first):")
+                        for idx, bo in enumerate(bullx_sorted):
+                            logger.info(f"              {idx+1}. Amount: {bo['order_amount']} (numeric: {bo['numeric_amount']:.2f})")
+                        
+                        logger.info(f"            DB orders sorted by bracket_id (highest first):")
+                        for idx, do in enumerate(db_sorted):
+                            logger.info(f"              {idx+1}. Order ID {do.id} (Bracket {do.bracket_id})")
+                        
+                        # Match smallest amount to highest bracket_id, second smallest to second highest, etc.
+                        matches_made = min(len(bullx_sorted), len(db_sorted))
+                        for i in range(matches_made):
+                            bullx_order = bullx_sorted[i]
+                            db_order = db_sorted[i]
+                            
+                            logger.info(f"         ✅ Step 3 Match: Amount '{bullx_order['order_amount']}' → Order ID {db_order.id} (Bracket {db_order.bracket_id})")
+                            
+                            matched_orders[db_order.id] = bullx_order['order_info']
+                            unmatched_db_orders.remove(db_order)
+                            
+                            # Update trigger condition AND order_amount
+                            await self._update_single_order_trigger_condition(
+                                db_order, 
+                                bullx_order['trigger_condition'], 
+                                bullx_order['parsed_data'].get('expiry', ''),
+                                bullx_order['order_amount']
+                            )
                     
-                    # Update trigger condition AND order_amount
-                    await self._update_single_order_trigger_condition(
-                        matched_order, 
-                        trigger_condition, 
-                        parsed_data.get('expiry', ''),
-                        parsed_data.get('order_amount', '')
-                    )
-                    break
+                    # Case 3: Mismatch in counts - log warning
+                    else:
+                        logger.warning(f"         ⚠️  Order count mismatch:")
+                        logger.warning(f"            BullX: {len(unmatched_bullx_orders)} orders, DB: {len(unmatched_db_orders)} orders")
+                        logger.warning(f"            Cannot reliably auto-deduce")
             
             # Log any unmatched orders
             if len(unmatched_db_orders) > 0 or remaining_bullx_orders > len(unmatched_db_orders):

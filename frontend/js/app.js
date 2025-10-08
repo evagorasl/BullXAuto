@@ -824,8 +824,8 @@ async function handleExecuteBracket() {
         button.innerHTML = '<span class="loading-spinner"></span>Executing...';
         button.disabled = true;
         
-        // Execute bracket strategy
-        const result = await api.executeBracketStrategy(address, amount, strategyNumber);
+        // Execute bracket strategy with optional bracket parameter
+        const result = await api.executeBracketStrategy(address, amount, bracket);
         
         if (result.success) {
             // Show success result

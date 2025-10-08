@@ -254,6 +254,9 @@ class EnhancedOrderProcessor:
         """
         Identify which bracket orders are missing for a coin and return missing order data.
         
+        We always expect 4 bracket orders (IDs 1-4) for each coin.
+        Missing orders are those that should exist but aren't on BullX.
+        
         Returns:
             List of missing order dictionaries with order info for renewal
         """
@@ -268,9 +271,8 @@ class EnhancedOrderProcessor:
             bracket_config = BRACKET_CONFIG[coin.bracket]
             bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
             
-            # Get active orders from database for this coin
-            db_orders = db_manager.get_orders_by_coin(coin.id)
-            active_db_orders = [o for o in db_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
+            # Expected bracket IDs: We always expect 4 orders (1, 2, 3, 4)
+            expected_bracket_ids = {1, 2, 3, 4}
             
             # Find which bracket IDs are present in BullX (from parsed orders)
             bullx_bracket_ids = set()
@@ -281,47 +283,60 @@ class EnhancedOrderProcessor:
                 if order_match and order_match.get('sub_id'):
                     bullx_bracket_ids.add(order_match['sub_id'])
             
-            # Find which bracket IDs are present in database
-            db_bracket_ids = {order.bracket_id for order in active_db_orders}
-            
-            # Find orders that are in database but missing from BullX
-            missing_bracket_ids = db_bracket_ids - bullx_bracket_ids
+            # Missing bracket IDs = Expected - What's on BullX
+            missing_bracket_ids = expected_bracket_ids - bullx_bracket_ids
             
             missing_orders = []
             
             if missing_bracket_ids:
                 logger.info(f"    🚨 MISSING ORDERS DETECTED!")
-                logger.info(f"    📋 Database has bracket IDs: {sorted(db_bracket_ids)}")
+                logger.info(f"    📋 Expected bracket IDs: {sorted(expected_bracket_ids)}")
                 logger.info(f"    📋 BullX shows bracket IDs: {sorted(bullx_bracket_ids)}")
                 logger.info(f"    ❌ Missing bracket IDs: {sorted(missing_bracket_ids)}")
                 
-                # Find the actual database orders that are missing
+                # For each missing bracket ID, we need to create a renewal entry
+                # We'll use coin data to determine the amount
                 for bracket_id in missing_bracket_ids:
-                    missing_db_order = None
-                    for db_order in active_db_orders:
-                        if db_order.bracket_id == bracket_id:
-                            missing_db_order = db_order
-                            break
+                    entry_price = bracket_entries[bracket_id - 1]  # Convert to 0-based index
+                    logger.info(f"      🔍 Missing Bracket ID {bracket_id}: Entry ${entry_price:,.0f}")
                     
-                    if missing_db_order:
-                        entry_price = bracket_entries[bracket_id - 1]  # Convert to 0-based index
-                        logger.info(f"      🔍 Missing Bracket ID {bracket_id}: Entry ${entry_price:,.0f} (Order ID: {missing_db_order.id})")
+                    # Try to find if there's a completed order with this bracket_id to get amount
+                    db_orders = db_manager.get_orders_by_coin(coin.id)
+                    profile_orders = [o for o in db_orders if o.profile_name == profile_name and o.bracket_id == bracket_id]
+                    
+                    # Use amount from most recent order if available
+                    amount = None
+                    order_id_ref = None
+                    
+                    if profile_orders:
+                        # Sort by updated_at or created_at to get most recent
+                        profile_orders.sort(key=lambda x: x.updated_at if x.updated_at else x.created_at, reverse=True)
+                        amount = profile_orders[0].amount
+                        order_id_ref = profile_orders[0].id
                         
+                        if amount:
+                            logger.info(f"         Using amount {amount} from previous order (ID: {order_id_ref})")
+                        else:
+                            logger.warning(f"         Previous order (ID: {order_id_ref}) has no amount stored")
+                    
+                    # Only create renewal entry if we have a valid amount
+                    if amount and amount > 0:
                         # Create missing order info for renewal processing
                         missing_order_info = {
-                            'order': missing_db_order,
+                            'order': None,  # No active order exists
                             'coin': coin,
                             'bracket_id': bracket_id,
                             'is_missing': True,
-                            'reason': 'Order present in database but missing from BullX'
+                            'amount': amount,
+                            'reason': f'Bracket ID {bracket_id} missing from BullX (expected 4 orders total)'
                         }
                         missing_orders.append(missing_order_info)
+                    else:
+                        logger.warning(f"         ⚠️  Skipping bracket ID {bracket_id} - no valid amount found in previous orders")
+                        logger.warning(f"            Cannot safely create order without knowing the amount")
                         
             else:
-                logger.info(f"    ✅ All database orders found on BullX")
-            
-            # Compare with BullX orders
-            logger.info(f"    📋 BullX shows {len(coin_orders)} orders, Database has {len(active_db_orders)} active orders")
+                logger.info(f"    ✅ All expected orders (4) found on BullX")
             
             return missing_orders
             
@@ -335,40 +350,31 @@ class EnhancedOrderProcessor:
             logger.info(f"    🔄 Processing {len(missing_orders)} missing orders...")
             
             for missing_order_info in missing_orders:
-                order = missing_order_info['order']
                 coin = missing_order_info['coin']
                 bracket_id = missing_order_info['bracket_id']
                 reason = missing_order_info['reason']
+                amount = missing_order_info['amount']
                 
-                logger.info(f"      📝 Processing missing order ID {order.id} (Bracket Sub ID {bracket_id})")
+                logger.info(f"      📝 Processing missing bracket ID {bracket_id}")
                 logger.info(f"         Reason: {reason}")
                 
-                # Update database status to COMPLETED (since it's missing from BullX)
-                db_update_success = db_manager.update_order_status(order.id, "COMPLETED")
+                # Add to renewal list (no database order to update since it doesn't exist)
+                renewal_info = {
+                    'order_id': None,  # No existing order in database
+                    'coin_address': coin.address,
+                    'coin_name': coin.name,
+                    'parsed_data': {'token': coin.name or 'Unknown', 'reason': reason},
+                    'button_index': 0,  # Not applicable for missing orders
+                    'row_index': 0,     # Not applicable for missing orders
+                    'original_bracket': coin.bracket,  # Use original bracket from coin
+                    'bracket_sub_id': bracket_id,
+                    'profile_name': profile_name,
+                    'amount': amount,
+                    'is_missing_order': True
+                }
                 
-                if db_update_success:
-                    logger.info(f"      ✅ Updated missing order {order.id} status to COMPLETED")
-                    
-                    # Add to renewal list (using original bracket from the order's coin)
-                    renewal_info = {
-                        'order_id': order.id,
-                        'coin_address': coin.address,
-                        'coin_name': coin.name,
-                        'parsed_data': {'token': coin.name or 'Unknown', 'reason': reason},
-                        'button_index': 0,  # Not applicable for missing orders
-                        'row_index': 0,     # Not applicable for missing orders
-                        'original_bracket': coin.bracket,  # Use original bracket from coin
-                        'bracket_sub_id': bracket_id,
-                        'profile_name': order.profile_name,
-                        'amount': order.amount or 1.0,
-                        'is_missing_order': True
-                    }
-                    
-                    self.orders_for_renewal.append(renewal_info)
-                    logger.info(f"      ✅ Missing order {order.id} marked for renewal")
-                    
-                else:
-                    logger.error(f"      ❌ Failed to update missing order {order.id} status")
+                self.orders_for_renewal.append(renewal_info)
+                logger.info(f"      ✅ Missing bracket ID {bracket_id} marked for renewal (amount: {amount})")
                     
         except Exception as e:
             logger.error(f"💥 Error processing missing orders: {e}")
@@ -2075,7 +2081,6 @@ class EnhancedOrderProcessor:
                 address=coin_address,
                 bracket_id=bracket_sub_id,
                 new_amount=amount,
-                strategy_number=1,  # Default strategy number
                 original_bracket=original_bracket  # Pass original bracket to preserve consistency
             )
             

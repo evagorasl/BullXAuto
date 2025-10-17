@@ -32,6 +32,9 @@ class EnhancedOrderProcessor:
         self.automator = bullx_automator
         self.driver_manager = bullx_automator.driver_manager
         self.orders_for_renewal = []  # Track orders marked for renewal
+        self.expired_coins = []  # Track coins with SL hit + any expired (cancel all + sell)
+        self.individual_expired_orders = []  # Track individually expired orders for renewal
+        self.current_selected_filter = None  # Track currently active filter button
         
     async def process_orders_enhanced(self, profile_name: str) -> Dict:
         """
@@ -48,11 +51,14 @@ class EnhancedOrderProcessor:
             logger.info(f"🚀 STARTING ENHANCED ORDER PROCESSING FOR {profile_name.upper()}")
             logger.info(f"{'='*80}")
             
-            # Clear previous renewal list
+            # Clear previous lists and reset filter state
             self.orders_for_renewal = []
+            self.expired_coins = []
+            self.individual_expired_orders = []
+            self.current_selected_filter = None  # Reset filter tracking
             
-            # Step 1: Check orders and detect TP conditions
-            logger.info("📋 Step 1: Checking orders and detecting TP conditions...")
+            # Step 1: Check orders and detect conditions (TP + expired)
+            logger.info("📋 Step 1: Checking orders and detecting conditions...")
             check_result = await self._check_orders_with_tp_detection(profile_name)
             
             if not check_result["success"]:
@@ -76,13 +82,29 @@ class EnhancedOrderProcessor:
                     "summary": "📭 No active orders found on the website. Browser driver closed."
                 }
             
-            # Step 2: Process orders marked for renewal
-            logger.info(f"\n📝 Step 2: Processing {len(self.orders_for_renewal)} orders marked for renewal...")
+            # Step 2: Process expired coins FIRST (SL hit + any expired - cancel all + sell)
+            expired_results = {"coins_processed": 0, "expired_details": []}
+            if self.expired_coins:
+                logger.info(f"\n🚨 Step 2: Processing {len(self.expired_coins)} expired coins (cancel all + sell)...")
+                expired_results = await self._process_expired_coins(profile_name)
+            else:
+                logger.info(f"\n✅ Step 2: No expired coins detected (cancel all + sell)")
+            
+            # Step 3: Process individual expired orders (delete individually + renewal)
+            individual_expired_results = {"orders_processed": 0}
+            if self.individual_expired_orders:
+                logger.info(f"\n⏰ Step 3: Processing {len(self.individual_expired_orders)} individual expired orders...")
+                individual_expired_results = await self._process_individual_expired_orders(profile_name)
+            else:
+                logger.info(f"\n✅ Step 3: No individual expired orders detected")
+            
+            # Step 4: Process TP renewal orders (only non-expired coins)
+            logger.info(f"\n📝 Step 4: Processing {len(self.orders_for_renewal)} orders marked for renewal...")
             renewal_results = await self._process_renewal_orders(profile_name)
             
-            # Step 3: Generate comprehensive output
-            logger.info("\n📊 Step 3: Generating processing summary...")
-            summary = self._generate_processing_summary(check_result, renewal_results)
+            # Step 5: Generate comprehensive output
+            logger.info("\n📊 Step 5: Generating processing summary...")
+            summary = self._generate_processing_summary(check_result, renewal_results, expired_results, individual_expired_results)
             
             logger.info(f"\n{'='*80}")
             logger.info(f"✅ ENHANCED ORDER PROCESSING COMPLETED FOR {profile_name.upper()}")
@@ -92,9 +114,11 @@ class EnhancedOrderProcessor:
                 "success": True,
                 "profile_name": profile_name,
                 "orders_checked": check_result.get("total_orders_checked", 0),
+                "expired_coins_processed": expired_results.get("coins_processed", 0),
                 "orders_marked_for_renewal": len(self.orders_for_renewal),
                 "orders_replaced": renewal_results.get("orders_replaced", 0),
                 "renewal_details": renewal_results.get("renewal_details", []),
+                "expired_details": expired_results.get("expired_details", []),
                 "summary": summary
             }
             
@@ -209,6 +233,60 @@ class EnhancedOrderProcessor:
             if not coin:
                 logger.warning(f"  ❌ Could not find coin for token: {token}")
                 return
+            
+            # PRIORITY 1: Check for SL hit + any expired condition
+            logger.info(f"  🔍 PRIORITY 1: Checking for SL hit + any expired...")
+            if self._check_sl_with_any_expired(coin_orders):
+                # This coin has SL hit + any expired - mark for expired cleanup (cancel all + sell)
+                expired_coin_info = {
+                    'coin': coin,
+                    'coin_orders': coin_orders,
+                    'button_index': coin_orders[0]['button_index'] if coin_orders else None,
+                    'profile_name': profile_name,
+                    'token': token
+                }
+                self.expired_coins.append(expired_coin_info)
+                logger.info(f"  ⚠️  Coin marked for expired cleanup - SKIPPING further processing")
+                return  # Early return - skip all other checks
+            
+            logger.info(f"  ✅ No SL hit with expired - checking for individual expired orders...")
+            
+            # PRIORITY 2: Check for individually expired orders (no SL hit)
+            logger.info(f"  🔍 PRIORITY 2: Checking for individual expired orders...")
+            individual_expired = self._get_individual_expired_orders(coin_orders)
+            
+            if individual_expired:
+                logger.info(f"  ⏰ Found {len(individual_expired)} individually expired orders")
+                logger.info(f"  📝 Marking expired orders for individual renewal...")
+                
+                # Process each expired order for renewal
+                for expired_order_info in individual_expired:
+                    try:
+                        # Identify the order in database
+                        order_match = self._identify_order(expired_order_info['parsed_data'], profile_name)
+                        
+                        if order_match and order_match.get('order'):
+                            # Add to individual expired list for processing
+                            expired_renewal_info = {
+                                'order': order_match['order'],
+                                'order_info': expired_order_info,
+                                'coin': coin,
+                                'profile_name': profile_name
+                            }
+                            self.individual_expired_orders.append(expired_renewal_info)
+                            logger.info(f"     ✅ Expired order identified for renewal: Order ID {order_match['order'].id}")
+                        else:
+                            logger.warning(f"     ❌ Could not identify expired order in database")
+                            
+                    except Exception as e:
+                        logger.error(f"     💥 Error processing expired order: {e}")
+                
+                # Don't return - continue to check for TP on non-expired orders
+                logger.info(f"  ℹ️  Will also check non-expired orders for TP conditions...")
+            else:
+                logger.info(f"  ✅ No individual expired orders found")
+            
+            logger.info(f"  🔍 PRIORITY 3: Proceeding with normal TP and missing order processing...")
             
             # Check if we have less than 4 orders and identify missing ones
             missing_orders = []
@@ -380,7 +458,10 @@ class EnhancedOrderProcessor:
             logger.error(f"💥 Error processing missing orders: {e}")
     
     async def _batch_delete_bullx_entries(self, profile_name: str, tp_orders: List[Dict]):
-        """Batch delete BullX entries for TP orders of a specific coin"""
+        """
+        Batch delete BullX entries for TP orders of a specific coin.
+        Uses order count verification to ensure deletion succeeded before updating database.
+        """
         try:
             successful_deletions = []
             coin_name = tp_orders[0]['coin'].name if tp_orders else "Unknown"
@@ -389,30 +470,51 @@ class EnhancedOrderProcessor:
                 order = tp_order['order']
                 order_info = tp_order['order_info']
                 coin = tp_order['coin']
+                button_index = order_info['button_index']
                 
                 logger.info(f"    📝 Processing order {order.id} for deletion ({i+1}/{len(tp_orders)})...")
                 
                 # Re-click the filter button for this coin before each deletion
                 # This ensures we have the correct view and row indices after previous deletions
-                filter_success = await self._click_coin_filter_button(profile_name, order_info['button_index'])
+                filter_success = await self._click_coin_filter_button(profile_name, button_index)
                 
                 if not filter_success:
                     logger.error(f"    ❌ Failed to click filter button for {coin_name} - skipping deletion")
                     continue
                 
                 # Try to delete entry from BullX
-                deletion_success = await self._delete_bullx_entry(
+                logger.info(f"    🗑️  Attempting to delete BullX entry...")
+                deletion_clicked = await self._delete_bullx_entry(
                     profile_name, 
-                    order_info['button_index'], 
+                    button_index, 
                     order_info['row_index']
                 )
                 
-                if deletion_success:
-                    # Only update database if BullX deletion succeeded
+                if not deletion_clicked:
+                    logger.error(f"    ❌ Failed to click delete button - skipping order {order.id}")
+                    continue
+                
+                # Wait for BullX to process the deletion
+                logger.info(f"    ⏳ Waiting for BullX to process deletion...")
+                time.sleep(2)
+                
+                # Verify deletion by counting orders
+                logger.info(f"    🔍 Verifying deletion success by counting orders...")
+                order_count = await self._count_bullx_orders_for_coin(profile_name, button_index)
+                
+                if order_count == -1:
+                    logger.error(f"    ❌ Could not verify deletion (count failed) - skipping order {order.id}")
+                    continue
+                
+                if order_count < 4:
+                    # Deletion successful - count is less than 4
+                    logger.info(f"    ✅ Deletion verified successful! Order count: {order_count} < 4")
+                    
+                    # Update database to COMPLETED
                     db_update_success = db_manager.update_order_status(order.id, "COMPLETED")
                     
                     if db_update_success:
-                        logger.info(f"    ✅ Successfully processed order {order.id}")
+                        logger.info(f"    ✅ Database updated - order {order.id} marked as COMPLETED")
                         
                         # Add to renewal list
                         renewal_info = {
@@ -420,7 +522,7 @@ class EnhancedOrderProcessor:
                             'coin_address': coin.address,
                             'coin_name': coin.name,
                             'parsed_data': order_info['parsed_data'],
-                            'button_index': order_info['button_index'],
+                            'button_index': button_index,
                             'row_index': order_info['row_index'],
                             'original_bracket': coin.bracket,
                             'bracket_sub_id': order.bracket_id,
@@ -430,26 +532,46 @@ class EnhancedOrderProcessor:
                         
                         self.orders_for_renewal.append(renewal_info)
                         successful_deletions.append(order.id)
+                        logger.info(f"    ✅ Order {order.id} marked for renewal")
                     else:
                         logger.error(f"    ❌ Database update failed for order {order.id}")
                 else:
-                    logger.error(f"    ❌ BullX deletion failed for order {order.id}")
+                    # Deletion failed - still 4 or more orders
+                    logger.error(f"    ❌ Deletion FAILED! Order count: {order_count} >= 4")
+                    logger.error(f"    ⚠️  BullX still shows {order_count} orders - order was not deleted")
+                    logger.error(f"    ⚠️  Skipping database update and renewal for order {order.id}")
             
             logger.info(f"  ✅ Successfully processed {len(successful_deletions)} orders for deletion")
             
         except Exception as e:
             logger.error(f"💥 Error in batch delete: {e}")
     
-    async def _click_coin_filter_button(self, profile_name: str, button_index: int) -> bool:
-        """Click the filter button for a specific coin to refresh the view"""
+    async def _click_coin_filter_button(self, profile_name: str, button_index: int, force: bool = False) -> bool:
+        """
+        Click the filter button for a specific coin to refresh the view.
+        Uses state tracking to avoid accidentally toggling filters off.
+        
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index (1-based)
+            force: If True, click even if already selected
+            
+        Returns:
+            True if successful (either clicked or already selected), False on error
+        """
         try:
+            # Skip if already selected (unless forced)
+            if not force and self.current_selected_filter == button_index:
+                logger.info(f"    ✅ Filter {button_index} already selected, skipping click")
+                return True
+            
             driver = self.driver_manager.get_driver(profile_name)
             
             # Find the button using the button_index from the original order checking
             # This corresponds to the filter buttons that were clicked during order checking
             button_selector = "button.ant-btn.ant-btn-text.ant-btn-sm.\\!px-1"
             
-            logger.info(f"    🔄 Re-clicking filter button {button_index} to refresh view...")
+            logger.info(f"    🔄 Clicking filter button {button_index} to refresh view...")
             
             try:
                 # Find all filter buttons
@@ -469,6 +591,9 @@ class EnhancedOrderProcessor:
                     grandParent.click()
                     logger.info(f"    ✅ Successfully clicked filter button {button_index}")
                     
+                    # Update tracking after successful click
+                    self.current_selected_filter = button_index
+                    
                     # Wait for the view to refresh
                     time.sleep(1)
                     
@@ -484,6 +609,56 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"    💥 Error in click_coin_filter_button: {e}")
             return False
+    
+    async def _count_bullx_orders_for_coin(self, profile_name: str, button_index: int) -> int:
+        """
+        Count the number of visible orders on BullX for a specific coin.
+        
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index for the coin
+            
+        Returns:
+            Number of visible orders, or -1 if count failed
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+            
+            logger.info(f"    📊 Counting orders for coin (button {button_index})...")
+            
+            # Re-click the filter button to ensure we have the correct view
+            filter_success = await self._click_coin_filter_button(profile_name, button_index)
+            if not filter_success:
+                logger.error(f"    ❌ Failed to click filter button - cannot count orders")
+                return -1
+            
+            # Wait a moment for the view to stabilize
+            time.sleep(1)
+            
+            # Count order rows using the same container structure as the XPATH
+            # The orders are in: //*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[*]
+            try:
+                # Use the container path to find all order rows
+                container_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]"
+                container = driver.find_element(By.XPATH, container_xpath)
+                
+                # Find all <a> elements within the container (each represents an order row)
+                order_rows = container.find_elements(By.TAG_NAME, "a")
+                order_count = len(order_rows)
+                
+                logger.info(f"    📊 Found {order_count} orders on BullX for this coin")
+                return order_count
+                
+            except NoSuchElementException:
+                logger.warning(f"    ⚠️  No order container found - assuming 0 orders")
+                return 0
+            except Exception as e:
+                logger.error(f"    💥 Error counting order rows: {e}")
+                return -1
+                
+        except Exception as e:
+            logger.error(f"    💥 Error in count_bullx_orders_for_coin: {e}")
+            return -1
     
     def _parse_row_data(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Parse row data to extract order information"""
@@ -1904,6 +2079,88 @@ class EnhancedOrderProcessor:
             import traceback
             logger.error(f"    💥 Traceback: {traceback.format_exc()}")
     
+    def _check_sl_with_any_expired(self, coin_orders: List[Dict]) -> bool:
+        """
+        PRIORITY 1: Check if coin has SL hit ("1 TP") AND any expired orders.
+        This triggers "cancel all + sell" regardless of whether SL order itself is expired.
+        
+        Args:
+            coin_orders: List of order info dicts from BullX with parsed_data
+            
+        Returns:
+            True if condition met (has SL hit + any expired), False otherwise
+        """
+        try:
+            has_sl_hit = False
+            has_any_expired = False
+            
+            for order_info in coin_orders:
+                parsed_data = order_info.get('parsed_data', {})
+                trigger = parsed_data.get('trigger_condition', '')
+                expiry = parsed_data.get('expiry', '')
+                
+                # Check for "1 TP" (SL was hit)
+                trigger_type = self._check_trigger_condition_type(trigger)
+                if trigger_type['has_tp_only']:
+                    has_sl_hit = True
+                    logger.debug(f"      Found SL hit order: trigger='{trigger}'")
+                
+                # Check if expired
+                if expiry == "00h 00m 00s":
+                    has_any_expired = True
+                    logger.debug(f"      Found expired order: expiry='{expiry}'")
+            
+            condition_met = has_sl_hit and has_any_expired
+            
+            if condition_met:
+                logger.info(f"  🚨 PRIORITY 1: SL hit + ANY expired detected!")
+                logger.info(f"     → Action: Cancel all + sell")
+            
+            return condition_met
+            
+        except Exception as e:
+            logger.error(f"Error checking SL + any expired condition: {e}")
+            return False
+    
+    def _get_individual_expired_orders(self, coin_orders: List[Dict]) -> List[Dict]:
+        """
+        PRIORITY 2: Get expired orders when NO SL hit.
+        Returns list of expired orders for individual renewal.
+        
+        Args:
+            coin_orders: List of order info dicts from BullX with parsed_data
+            
+        Returns:
+            List of expired order info dicts
+        """
+        try:
+            expired_orders = []
+            
+            for order_info in coin_orders:
+                parsed_data = order_info.get('parsed_data', {})
+                expiry = parsed_data.get('expiry', '')
+                
+                if expiry == "00h 00m 00s":
+                    expired_orders.append(order_info)
+                    logger.debug(f"      Found individually expired order")
+            
+            if expired_orders:
+                logger.info(f"  ⏰ PRIORITY 2: {len(expired_orders)} individually expired orders detected!")
+                logger.info(f"     → Action: Renew expired orders individually")
+            
+            return expired_orders
+            
+        except Exception as e:
+            logger.error(f"Error getting individual expired orders: {e}")
+            return []
+    
+    def _check_sl_expired_condition(self, coin_orders: List[Dict]) -> bool:
+        """
+        DEPRECATED: Use _check_sl_with_any_expired instead.
+        Kept for backward compatibility.
+        """
+        return self._check_sl_with_any_expired(coin_orders)
+    
     def _get_coin_safely(self, order: Order) -> Optional[Coin]:
         """Safely get coin information without session issues"""
         try:
@@ -1940,6 +2197,369 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"Error getting coin safely: {e}")
             return None
+    
+    async def _process_individual_expired_orders(self, profile_name: str) -> Dict:
+        """
+        Process individual expired orders: Delete from BullX, update to COMPLETED, mark for renewal.
+        
+        Args:
+            profile_name: Chrome profile name
+            
+        Returns:
+            Dict with processing results
+        """
+        try:
+            if not self.individual_expired_orders:
+                logger.info("📝 No individual expired orders to process")
+                return {"orders_processed": 0}
+            
+            logger.info(f"\n{'='*80}")
+            logger.info(f"⏰ PROCESSING {len(self.individual_expired_orders)} INDIVIDUAL EXPIRED ORDERS")
+            logger.info(f"{'='*80}")
+            
+            orders_processed = 0
+            
+            for expired_order_dict in self.individual_expired_orders:
+                try:
+                    order = expired_order_dict['order']
+                    order_info = expired_order_dict['order_info']
+                    coin = expired_order_dict['coin']
+                    button_index = order_info['button_index']
+                    row_index = order_info['row_index']
+                    
+                    logger.info(f"\n📝 Processing expired order: ID {order.id} (Bracket {order.bracket_id})")
+                    logger.info(f"   Coin: {coin.name or coin.address}")
+                    
+                    # Step 1: Re-click filter button
+                    filter_success = await self._click_coin_filter_button(profile_name, button_index)
+                    if not filter_success:
+                        logger.error(f"   ❌ Failed to click filter button - skipping")
+                        continue
+                    
+                    # Step 2: Delete from BullX
+                    logger.info(f"   🗑️  Deleting expired order from BullX...")
+                    deletion_success = await self._delete_bullx_entry(profile_name, button_index, row_index)
+                    
+                    if not deletion_success:
+                        logger.error(f"   ❌ Failed to delete from BullX - skipping")
+                        continue
+                    
+                    # Wait for deletion to process
+                    time.sleep(2)
+                    
+                    # Step 3: Update database to EXPIRED (not COMPLETED, since it expired individually)
+                    logger.info(f"   📝 Updating database to EXPIRED...")
+                    db_success = db_manager.update_order_status(order.id, "EXPIRED")
+                    
+                    if not db_success:
+                        logger.error(f"   ❌ Failed to update database - skipping")
+                        continue
+                    
+                    logger.info(f"   ✅ Order {order.id} marked as EXPIRED")
+                    
+                    # Step 4: Mark for renewal
+                    renewal_info = {
+                        'order_id': order.id,
+                        'coin_address': coin.address,
+                        'coin_name': coin.name,
+                        'parsed_data': order_info['parsed_data'],
+                        'button_index': button_index,
+                        'row_index': row_index,
+                        'original_bracket': coin.bracket,
+                        'bracket_sub_id': order.bracket_id,
+                        'profile_name': profile_name,
+                        'amount': order.amount or 1.0
+                    }
+                    
+                    self.orders_for_renewal.append(renewal_info)
+                    orders_processed += 1
+                    logger.info(f"   ✅ Order {order.id} marked for renewal")
+                    
+                except Exception as e:
+                    logger.error(f"   💥 Error processing individual expired order: {e}")
+                    continue
+            
+            logger.info(f"\n{'='*80}")
+            logger.info(f"✅ INDIVIDUAL EXPIRED ORDERS COMPLETED: {orders_processed}/{len(self.individual_expired_orders)}")
+            logger.info(f"{'='*80}")
+            
+            return {"orders_processed": orders_processed}
+            
+        except Exception as e:
+            logger.error(f"💥 Error processing individual expired orders: {e}")
+            return {"orders_processed": 0, "error": str(e)}
+    
+    async def _process_expired_coins(self, profile_name: str) -> Dict:
+        """
+        Process coins with SL hit + all expired: Cancel all orders, sell all coins, update DB.
+        
+        Args:
+            profile_name: Chrome profile name
+            
+        Returns:
+            Dict with processing results
+        """
+        try:
+            if not self.expired_coins:
+                logger.info("📝 No expired coins to process")
+                return {"coins_processed": 0, "expired_details": []}
+            
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🚨 PROCESSING {len(self.expired_coins)} EXPIRED COINS")
+            logger.info(f"{'='*80}")
+            
+            expired_details = []
+            coins_processed = 0
+            
+            for expired_coin_info in self.expired_coins:
+                try:
+                    coin = expired_coin_info['coin']
+                    button_index = expired_coin_info['button_index']
+                    token = expired_coin_info['token']
+                    coin_orders = expired_coin_info['coin_orders']
+                    
+                    logger.info(f"\n🪙 Processing expired coin: {coin.name or coin.address}")
+                    logger.info(f"   Orders on BullX: {len(coin_orders)}")
+                    
+                    coin_detail = {
+                        'coin_address': coin.address,
+                        'coin_name': coin.name,
+                        'orders_cancelled': 0,
+                        'sell_success': False,
+                        'db_orders_updated': 0
+                    }
+                    
+                    # Step 1: Cancel all orders for this coin
+                    logger.info(f"   📋 Step 1: Cancelling all orders...")
+                    cancel_success = await self._cancel_all_orders_for_coin(profile_name, button_index)
+                    
+                    if cancel_success:
+                        coin_detail['orders_cancelled'] = len(coin_orders)
+                        logger.info(f"   ✅ Successfully cancelled all orders")
+                    else:
+                        logger.error(f"   ❌ Failed to cancel all orders")
+                        expired_details.append(coin_detail)
+                        continue
+                    
+                    # Step 2: Sell all remaining coins
+                    logger.info(f"   💰 Step 2: Selling all remaining coins...")
+                    sell_success = await self._sell_all_coins(profile_name, coin.url)
+                    
+                    coin_detail['sell_success'] = sell_success
+                    if sell_success:
+                        logger.info(f"   ✅ Successfully sold all coins")
+                    else:
+                        logger.error(f"   ❌ Failed to sell all coins (best effort)")
+                    
+                    # Step 3: Update database orders to EXPIRED
+                    logger.info(f"   📝 Step 3: Updating database orders to EXPIRED...")
+                    updated_count = self._update_orders_to_expired(coin.id, profile_name)
+                    coin_detail['db_orders_updated'] = updated_count
+                    
+                    if updated_count > 0:
+                        logger.info(f"   ✅ Updated {updated_count} orders to EXPIRED status")
+                    else:
+                        logger.warning(f"   ⚠️  No orders updated in database")
+                    
+                    coins_processed += 1
+                    expired_details.append(coin_detail)
+                    
+                except Exception as e:
+                    logger.error(f"   💥 Error processing expired coin {coin.name or coin.address}: {e}")
+                    continue
+            
+            logger.info(f"\n{'='*80}")
+            logger.info(f"✅ EXPIRED COIN PROCESSING COMPLETED: {coins_processed}/{len(self.expired_coins)}")
+            logger.info(f"{'='*80}")
+            
+            return {
+                "coins_processed": coins_processed,
+                "expired_details": expired_details
+            }
+            
+        except Exception as e:
+            logger.error(f"💥 Error processing expired coins: {e}")
+            return {"coins_processed": 0, "expired_details": [], "error": str(e)}
+    
+    async def _cancel_all_orders_for_coin(self, profile_name: str, button_index: int) -> bool:
+        """
+        Cancel all orders for a specific coin using the Cancel All button.
+        
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index for the coin
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+            
+            # Re-click filter button to ensure correct view
+            filter_success = await self._click_coin_filter_button(profile_name, button_index)
+            if not filter_success:
+                logger.error(f"      ❌ Failed to click filter button")
+                return False
+            
+            # Find and click the Cancel All button
+            cancel_all_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button/span"
+            
+            try:
+                # Try to find the button or its parent
+                try:
+                    cancel_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, cancel_all_xpath))
+                    )
+                except:
+                    # Try parent button element
+                    cancel_all_button_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button"
+                    cancel_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, cancel_all_button_xpath))
+                    )
+                
+                # Scroll into view
+                driver.execute_script("arguments[0].scrollIntoView(true);", cancel_button)
+                time.sleep(0.5)
+                
+                # Click the button
+                cancel_button.click()
+                logger.info(f"      ✅ Clicked Cancel All button")
+                
+                # Wait for cancellation to process
+                time.sleep(2)
+                
+                return True
+                
+            except TimeoutException:
+                logger.error(f"      ❌ Cancel All button not found")
+                return False
+            except Exception as e:
+                logger.error(f"      💥 Error clicking Cancel All button: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"      💥 Error in cancel_all_orders_for_coin: {e}")
+            return False
+    
+    async def _sell_all_coins(self, profile_name: str, coin_url: str) -> bool:
+        """
+        Navigate to coin page and sell all remaining coins.
+        
+        Args:
+            profile_name: Chrome profile name
+            coin_url: URL of the coin page
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+            
+            if not coin_url:
+                logger.error(f"      ❌ No coin URL provided")
+                return False
+            
+            # Navigate to coin page
+            logger.info(f"      🌐 Navigating to coin page: {coin_url}")
+            driver.get(coin_url)
+            time.sleep(2)
+            
+            # Click Sell button
+            sell_button_xpath = "//*[@id='root']/div[1]/div[2]/main/div/div[2]/aside/div/div[3]/div/div/div/div[1]/div[3]/div[1]/div/div/label[2]/div"
+            
+            try:
+                sell_button = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, sell_button_xpath))
+                )
+                sell_button.click()
+                logger.info(f"      ✅ Clicked Sell button")
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"      ❌ Failed to click Sell button: {e}")
+                return False
+            
+            # Click 100% button
+            percent_100_xpath = "//*[contains(@id, 'panel-sell')]/div/div[2]/div/div[1]/div[2]/button[4]/span"
+            
+            try:
+                # Try span first
+                try:
+                    percent_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, percent_100_xpath))
+                    )
+                except:
+                    # Try parent button
+                    percent_100_button_xpath = "//*[contains(@id, 'panel-sell')]/div/div[2]/div/div[1]/div[2]/button[4]"
+                    percent_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, percent_100_button_xpath))
+                    )
+                
+                percent_button.click()
+                logger.info(f"      ✅ Clicked 100% button")
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"      ❌ Failed to click 100% button: {e}")
+                return False
+            
+            # Click final Sell button
+            final_sell_xpath = "//*[contains(@id, 'panel-sell')]/div/div[2]/div/footer/div[3]/button"
+            
+            try:
+                final_sell_button = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, final_sell_xpath))
+                )
+                final_sell_button.click()
+                logger.info(f"      ✅ Clicked final Sell button")
+                time.sleep(2)
+            except Exception as e:
+                logger.error(f"      ❌ Failed to click final Sell button: {e}")
+                return False
+            
+            # Navigate back to automation tab
+            logger.info(f"      🔙 Navigating back to automation tab...")
+            automation_url = "https://bullx.io/terminal?chainId=1399811149"
+            driver.get(automation_url)
+            time.sleep(2)
+            
+            logger.info(f"      ✅ Successfully completed sell operation")
+            return True
+            
+        except Exception as e:
+            logger.error(f"      💥 Error in sell_all_coins: {e}")
+            return False
+    
+    def _update_orders_to_expired(self, coin_id: int, profile_name: str) -> int:
+        """
+        Update all active orders for a coin and profile to EXPIRED status.
+        
+        Args:
+            coin_id: Coin database ID
+            profile_name: Chrome profile name
+            
+        Returns:
+            Number of orders updated
+        """
+        try:
+            # Get all active orders for this coin and profile
+            all_orders = db_manager.get_orders_by_coin(coin_id)
+            active_orders = [o for o in all_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
+            
+            logger.info(f"      📋 Found {len(active_orders)} active orders to update")
+            
+            updated_count = 0
+            for order in active_orders:
+                success = db_manager.update_order_status(order.id, "EXPIRED")
+                if success:
+                    updated_count += 1
+                    logger.debug(f"         ✅ Updated order {order.id} to EXPIRED")
+                else:
+                    logger.warning(f"         ⚠️  Failed to update order {order.id}")
+            
+            return updated_count
+            
+        except Exception as e:
+            logger.error(f"      💥 Error updating orders to expired: {e}")
+            return 0
     
     async def _delete_bullx_entry(self, profile_name: str, button_index: int, row_index: int) -> bool:
         """Delete entry from BullX using the specified XPATH"""
@@ -2107,7 +2727,7 @@ class EnhancedOrderProcessor:
                 "error": str(e)
             }
     
-    def _generate_processing_summary(self, check_result: Dict, renewal_results: Dict) -> str:
+    def _generate_processing_summary(self, check_result: Dict, renewal_results: Dict, expired_results: Dict = None) -> str:
         """Generate comprehensive processing summary"""
         try:
             summary_lines = []
@@ -2119,6 +2739,11 @@ class EnhancedOrderProcessor:
             tp_detected = check_result.get("tp_detected_count", 0)
             summary_lines.append(f"📋 Orders Checked: {total_checked}")
             summary_lines.append(f"🎯 TP Conditions Detected: {tp_detected}")
+            
+            # Expired coins summary
+            if expired_results:
+                expired_coins = expired_results.get("coins_processed", 0)
+                summary_lines.append(f"🚨 Expired Coins Processed: {expired_coins}")
             
             # Renewal summary
             orders_replaced = renewal_results.get("orders_replaced", 0)

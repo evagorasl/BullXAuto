@@ -5,9 +5,14 @@ from bracket_config import (
     calculate_bracket, get_bracket_info, calculate_order_parameters,
     BRACKET_CONFIG, BRACKET_RANGES, TRADE_SIZES, TAKE_PROFIT_PERCENTAGES
 )
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Generator
+from contextlib import contextmanager
 import os
 from datetime import datetime
+import logging
+
+# Logger setup
+logger = logging.getLogger(__name__)
 
 # Database configuration
 DATABASE_URL = "sqlite:///./bullx_auto.db"
@@ -697,6 +702,214 @@ class DatabaseManager:
         except Exception as e:
             db.rollback()
             raise e
+        finally:
+            db.close()
+
+    @contextmanager
+    def atomic_transaction(self) -> Generator[Session, None, None]:
+        """
+        Context manager for atomic database transactions.
+        All operations within the context either commit together or rollback together.
+
+        Usage:
+            with db_manager.atomic_transaction() as session:
+                # Multiple operations
+                session.add(order)
+                session.flush()
+                # All commit or all rollback
+        """
+        session = self.SessionLocal()
+        try:
+            yield session
+            session.commit()
+            logger.info("✅ Transaction committed successfully")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"❌ Transaction rolled back due to error: {e}")
+            raise
+        finally:
+            session.close()
+
+    def mark_order_for_replacement(self, order_id: int, new_status: str = "REPLACED") -> bool:
+        """
+        Mark an order as REPLACED (or other status) atomically.
+        Used during renewal process.
+
+        Args:
+            order_id: Order ID to update
+            new_status: New status (default: REPLACED)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.atomic_transaction() as session:
+                order = session.query(Order).filter(Order.id == order_id).first()
+                if not order:
+                    logger.error(f"Order {order_id} not found")
+                    return False
+
+                old_status = order.status
+                order.status = new_status
+                order.updated_at = datetime.now()
+                if new_status in ["COMPLETED", "STOPPED", "EXPIRED", "REPLACED"]:
+                    order.completed_at = datetime.now()
+                session.flush()
+
+                logger.info(f"✅ Order {order_id} status: {old_status} → {new_status}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to mark order {order_id} as {new_status}: {e}")
+            return False
+
+    def detect_duplicate_active_orders(self, profile_name: Optional[str] = None) -> List[dict]:
+        """
+        Detect duplicate ACTIVE orders with same (coin_id, bracket_id, profile_name).
+
+        Args:
+            profile_name: Optional profile filter
+
+        Returns:
+            List of duplicate groups with order details
+        """
+        db = self.SessionLocal()
+        try:
+            from sqlalchemy import func
+
+            # Query for duplicates
+            query = db.query(
+                Order.coin_id,
+                Order.bracket_id,
+                Order.profile_name,
+                func.count(Order.id).label('count')
+            ).filter(
+                Order.status == "ACTIVE"
+            ).group_by(
+                Order.coin_id,
+                Order.bracket_id,
+                Order.profile_name
+            ).having(
+                func.count(Order.id) > 1
+            )
+
+            if profile_name:
+                query = query.filter(Order.profile_name == profile_name)
+
+            duplicates = query.all()
+
+            # Get detailed order info for each duplicate group
+            result = []
+            for dup in duplicates:
+                orders = db.query(Order).filter(
+                    Order.coin_id == dup.coin_id,
+                    Order.bracket_id == dup.bracket_id,
+                    Order.profile_name == dup.profile_name,
+                    Order.status == "ACTIVE"
+                ).order_by(Order.created_at).all()
+
+                coin = db.query(Coin).filter(Coin.id == dup.coin_id).first()
+
+                result.append({
+                    'coin_id': dup.coin_id,
+                    'coin_name': coin.name if coin else 'Unknown',
+                    'bracket_id': dup.bracket_id,
+                    'profile_name': dup.profile_name,
+                    'count': dup.count,
+                    'orders': [
+                        {
+                            'id': o.id,
+                            'created_at': o.created_at,
+                            'amount': o.amount
+                        } for o in orders
+                    ]
+                })
+
+            return result
+        finally:
+            db.close()
+
+    def fix_duplicate_active_orders(self, dry_run: bool = False) -> int:
+        """
+        Fix duplicate ACTIVE orders by marking older duplicates as REPLACED.
+        Keeps the newest order for each (coin_id, bracket_id, profile_name) group.
+
+        Args:
+            dry_run: If True, only log what would be fixed without making changes
+
+        Returns:
+            Number of orders marked as REPLACED
+        """
+        duplicates = self.detect_duplicate_active_orders()
+
+        if not duplicates:
+            logger.info("✅ No duplicate ACTIVE orders found")
+            return 0
+
+        logger.warning(f"⚠️  Found {len(duplicates)} duplicate groups")
+
+        fixed_count = 0
+
+        for dup_group in duplicates:
+            logger.warning(f"   Duplicate: Coin {dup_group['coin_name']}, Bracket {dup_group['bracket_id']}")
+            logger.warning(f"   {dup_group['count']} ACTIVE orders found:")
+
+            # Sort by created_at, keep newest
+            orders = sorted(dup_group['orders'], key=lambda x: x['created_at'])
+
+            for order in orders[:-1]:  # All except newest
+                logger.warning(f"      Order {order['id']}: {order['created_at']} [WILL MARK AS REPLACED]")
+
+                if not dry_run:
+                    success = self.mark_order_for_replacement(order['id'], "REPLACED")
+                    if success:
+                        fixed_count += 1
+
+            # Keep newest
+            newest = orders[-1]
+            logger.info(f"      Order {newest['id']}: {newest['created_at']} [KEEPING]")
+
+        if dry_run:
+            logger.info(f"🔍 DRY RUN: Would fix {len(duplicates)} duplicate groups")
+        else:
+            logger.info(f"✅ Fixed {fixed_count} duplicate orders")
+
+        return fixed_count
+
+    def detect_stale_active_orders(self, max_age_hours: int = 72, profile_name: Optional[str] = None) -> List[Order]:
+        """
+        Detect ACTIVE orders older than specified hours.
+        These may be stuck and need manual review.
+
+        Args:
+            max_age_hours: Maximum age in hours (default: 72 hours = 3 days)
+            profile_name: Optional profile filter
+
+        Returns:
+            List of stale orders
+        """
+        from datetime import timedelta
+
+        db = self.SessionLocal()
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=max_age_hours)
+
+            query = db.query(Order).filter(
+                Order.status == "ACTIVE",
+                Order.created_at < cutoff_time
+            )
+
+            if profile_name:
+                query = query.filter(Order.profile_name == profile_name)
+
+            stale_orders = query.all()
+
+            if stale_orders:
+                logger.warning(f"⚠️  Found {len(stale_orders)} stale ACTIVE orders (older than {max_age_hours}h)")
+                for order in stale_orders:
+                    age_hours = (datetime.now() - order.created_at).total_seconds() / 3600
+                    logger.warning(f"   Order {order.id}: {age_hours:.1f}h old, bracket {order.bracket_id}")
+
+            return stale_orders
         finally:
             db.close()
 

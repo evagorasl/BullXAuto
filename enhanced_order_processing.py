@@ -2280,24 +2280,28 @@ class EnhancedOrderProcessor:
                     # Step 2: Delete from BullX using adjusted row index
                     logger.info(f"   🗑️  Deleting expired order from BullX...")
                     deletion_success = await self._delete_bullx_entry(profile_name, button_index, adjusted_row_index)
-                    
+
                     if not deletion_success:
                         logger.error(f"   ❌ Failed to delete from BullX - skipping")
                         # Don't increment deletions_made since deletion didn't happen
                         continue
-                    
+
                     # Wait for deletion to process
                     time.sleep(2)
-                    
-                    # Step 3: Update database to EXPIRED (not COMPLETED, since it expired individually)
-                    logger.info(f"   📝 Updating database to EXPIRED...")
-                    db_success = db_manager.update_order_status(order.id, "EXPIRED")
-                    
+
+                    # CRITICAL: Mark as EXPIRED IMMEDIATELY after BullX deletion
+                    # This ensures if crash happens, at least old order is marked properly
+                    # Using atomic transaction to prevent partial updates
+                    logger.info(f"   📝 Marking order {order.id} as EXPIRED immediately...")
+                    db_success = db_manager.mark_order_for_replacement(order.id, "EXPIRED")
+
                     if not db_success:
-                        logger.error(f"   ❌ Failed to update database - skipping")
-                        # Don't increment deletions_made since we skip database update on failure
+                        logger.error(f"   ❌ Failed to mark order as EXPIRED - ORDER ORPHANED!")
+                        logger.error(f"   ⚠️  Order {order.id} deleted from BullX but still ACTIVE in database")
+                        logger.error(f"   🔧 Manual intervention required - run startup recovery")
+                        # Don't increment deletions_made since database update failed
                         continue
-                    
+
                     logger.info(f"   ✅ Order {order.id} marked as EXPIRED")
                     
                     # Step 4: Mark for renewal

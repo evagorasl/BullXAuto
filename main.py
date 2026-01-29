@@ -35,16 +35,59 @@ from routers import secure_router, public_router
 from middleware import CloseDriverMiddleware
 from auto_monitoring_middleware import AutoMonitoringMiddleware
 
+async def validate_database_consistency():
+    """
+    Validate database consistency at startup.
+    Detects and fixes:
+    - Duplicate ACTIVE orders with same bracket_id
+    - Stale ACTIVE orders (older than 72 hours)
+
+    This prevents issues from power outages or crashes.
+    """
+    logger.info("=" * 60)
+    logger.info("🔍 STARTUP: Validating database consistency...")
+    logger.info("=" * 60)
+
+    # Check for duplicates
+    logger.info("Checking for duplicate ACTIVE orders...")
+    duplicates = db_manager.detect_duplicate_active_orders()
+
+    if duplicates:
+        logger.warning(f"⚠️  Found {len(duplicates)} duplicate order groups")
+        logger.info("🔧 Running automatic fix...")
+
+        fixed_count = db_manager.fix_duplicate_active_orders(dry_run=False)
+        logger.info(f"✅ Fixed {fixed_count} duplicate orders")
+    else:
+        logger.info("✅ No duplicate orders found")
+
+    # Check for stale orders
+    logger.info("Checking for stale ACTIVE orders (>72 hours)...")
+    stale_orders = db_manager.detect_stale_active_orders(max_age_hours=72)
+
+    if stale_orders:
+        logger.warning(f"⚠️  Found {len(stale_orders)} stale orders - manual review recommended")
+        logger.warning("   These orders may need to be manually marked as COMPLETED or STOPPED")
+    else:
+        logger.info("✅ No stale orders found")
+
+    logger.info("=" * 60)
+    logger.info("✅ Database consistency check complete")
+    logger.info("=" * 60)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     logger.info("Starting BullX Automation API...")
-    
+
     # Initialize database
     create_tables()
     init_profiles()
-    
+
+    # CRITICAL: Validate database consistency before starting monitoring
+    await validate_database_consistency()
+
     # Start background monitoring for active profiles
     await start_monitoring_for_active_profiles()
     

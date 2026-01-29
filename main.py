@@ -177,13 +177,6 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
-        reload_includes=[
-            "*.py",             # Only watch Python files
-        ],
-        reload_excludes=[
-            "logs/**",          # Ignore logs directory completely
-            "screenshots/**",   # Ignore screenshots directory
-        ],
+        reload=False,  # Disabled: auto-reload causes issues with log/db file changes
         log_level="info"
     )

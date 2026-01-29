@@ -178,14 +178,12 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
+        reload_includes=[
+            "*.py",             # Only watch Python files
+        ],
         reload_excludes=[
-            "logs/*",           # Ignore log files
-            "*.db",             # Ignore database files
-            "*.log",            # Ignore any log files
-            "screenshots/*",    # Ignore screenshot directory
-            "__pycache__/*",    # Ignore Python cache
-            "*.pyc",            # Ignore compiled Python files
-            ".claude/*"         # Ignore Claude settings
+            "logs/**",          # Ignore logs directory completely
+            "screenshots/**",   # Ignore screenshots directory
         ],
         log_level="info"
     )

@@ -5,6 +5,15 @@ from contextlib import asynccontextmanager
 import uvicorn
 import logging
 import os
+from datetime import datetime
+
+# Create logs directory if it doesn't exist
+logs_dir = 'logs'
+if not os.path.exists(logs_dir):
+    os.makedirs(logs_dir)
+
+# Generate log filename based on current date (format: YYYY-MM-DD.log)
+log_filename = os.path.join(logs_dir, f"{datetime.now().strftime('%Y-%m-%d')}.log")
 
 # Configure logging with timestamp and file output BEFORE importing any modules
 logging.basicConfig(
@@ -12,7 +21,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%d/%m/%Y-%H:%M:%S',
     handlers=[
-        logging.FileHandler('console_output.txt', mode='a', encoding='utf-8'),
+        logging.FileHandler(log_filename, mode='a', encoding='utf-8'),
         logging.StreamHandler()  # Keep console output as well
     ]
 )

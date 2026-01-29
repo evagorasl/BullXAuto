@@ -32,6 +32,7 @@ class EnhancedOrderProcessor:
         self.automator = bullx_automator
         self.driver_manager = bullx_automator.driver_manager
         self.orders_for_renewal = []  # Track orders marked for renewal
+        self.renewed_order_ids = set()  # Track order IDs already marked for renewal (prevents duplicates)
         self.expired_coins = []  # Track coins with SL hit + any expired (cancel all + sell)
         self.individual_expired_orders = []  # Track individually expired orders for renewal
         self.current_selected_filter = None  # Track currently active filter button
@@ -53,6 +54,7 @@ class EnhancedOrderProcessor:
             
             # Clear previous lists and reset filter state
             self.orders_for_renewal = []
+            self.renewed_order_ids = set()  # Clear the duplicate tracking set
             self.expired_coins = []
             self.individual_expired_orders = []
             self.current_selected_filter = None  # Reset filter tracking
@@ -436,23 +438,29 @@ class EnhancedOrderProcessor:
                 logger.info(f"      📝 Processing missing bracket ID {bracket_id}")
                 logger.info(f"         Reason: {reason}")
                 
-                # Add to renewal list (no database order to update since it doesn't exist)
-                renewal_info = {
-                    'order_id': None,  # No existing order in database
-                    'coin_address': coin.address,
-                    'coin_name': coin.name,
-                    'parsed_data': {'token': coin.name or 'Unknown', 'reason': reason},
-                    'button_index': 0,  # Not applicable for missing orders
-                    'row_index': 0,     # Not applicable for missing orders
-                    'original_bracket': coin.bracket,  # Use original bracket from coin
-                    'bracket_sub_id': bracket_id,
-                    'profile_name': profile_name,
-                    'amount': amount,
-                    'is_missing_order': True
-                }
-                
-                self.orders_for_renewal.append(renewal_info)
-                logger.info(f"      ✅ Missing bracket ID {bracket_id} marked for renewal (amount: {amount})")
+                # Check for duplicates before adding (using coin+bracket as key for missing orders)
+                missing_key = f"{coin.address}_{bracket_id}"
+                if missing_key not in self.renewed_order_ids:
+                    # Add to renewal list (no database order to update since it doesn't exist)
+                    renewal_info = {
+                        'order_id': None,  # No existing order in database
+                        'coin_address': coin.address,
+                        'coin_name': coin.name,
+                        'parsed_data': {'token': coin.name or 'Unknown', 'reason': reason},
+                        'button_index': 0,  # Not applicable for missing orders
+                        'row_index': 0,     # Not applicable for missing orders
+                        'original_bracket': coin.bracket,  # Use original bracket from coin
+                        'bracket_sub_id': bracket_id,
+                        'profile_name': profile_name,
+                        'amount': amount,
+                        'is_missing_order': True
+                    }
+                    
+                    self.orders_for_renewal.append(renewal_info)
+                    self.renewed_order_ids.add(missing_key)
+                    logger.info(f"      ✅ Missing bracket ID {bracket_id} marked for renewal (amount: {amount})")
+                else:
+                    logger.info(f"      ⚠️  Missing bracket ID {bracket_id} already marked for renewal - skipping duplicate")
                     
         except Exception as e:
             logger.error(f"💥 Error processing missing orders: {e}")
@@ -461,18 +469,31 @@ class EnhancedOrderProcessor:
         """
         Batch delete BullX entries for TP orders of a specific coin.
         Uses order count verification to ensure deletion succeeded before updating database.
+        Handles row index shifting by tracking deletions and adjusting indices.
         """
         try:
             successful_deletions = []
             coin_name = tp_orders[0]['coin'].name if tp_orders else "Unknown"
             
-            for i, tp_order in enumerate(tp_orders):
+            # Sort TP orders by row_index (ascending) to process top-to-bottom
+            # This ensures we can accurately track and adjust for row shifts
+            tp_orders_sorted = sorted(tp_orders, key=lambda x: x['order_info']['row_index'])
+            
+            # Track deletions to adjust row indices as rows shift up
+            deletions_made = 0
+            
+            for i, tp_order in enumerate(tp_orders_sorted):
                 order = tp_order['order']
                 order_info = tp_order['order_info']
                 coin = tp_order['coin']
                 button_index = order_info['button_index']
+                original_row_index = order_info['row_index']
                 
-                logger.info(f"    📝 Processing order {order.id} for deletion ({i+1}/{len(tp_orders)})...")
+                # Adjust row index based on previous deletions (rows shift up)
+                adjusted_row_index = original_row_index - deletions_made
+                
+                logger.info(f"    📝 Processing order {order.id} for deletion ({i+1}/{len(tp_orders_sorted)})...")
+                logger.info(f"       Original row: {original_row_index}, Adjusted row: {adjusted_row_index}, Deletions made: {deletions_made}")
                 
                 # Re-click the filter button for this coin before each deletion
                 # This ensures we have the correct view and row indices after previous deletions
@@ -482,16 +503,17 @@ class EnhancedOrderProcessor:
                     logger.error(f"    ❌ Failed to click filter button for {coin_name} - skipping deletion")
                     continue
                 
-                # Try to delete entry from BullX
+                # Try to delete entry from BullX using adjusted row index
                 logger.info(f"    🗑️  Attempting to delete BullX entry...")
                 deletion_clicked = await self._delete_bullx_entry(
                     profile_name, 
                     button_index, 
-                    order_info['row_index']
+                    adjusted_row_index
                 )
                 
                 if not deletion_clicked:
                     logger.error(f"    ❌ Failed to click delete button - skipping order {order.id}")
+                    # Don't increment deletions_made since deletion didn't happen
                     continue
                 
                 # Wait for BullX to process the deletion
@@ -504,6 +526,7 @@ class EnhancedOrderProcessor:
                 
                 if order_count == -1:
                     logger.error(f"    ❌ Could not verify deletion (count failed) - skipping order {order.id}")
+                    # Don't increment deletions_made since we couldn't verify
                     continue
                 
                 if order_count < 4:
@@ -532,14 +555,19 @@ class EnhancedOrderProcessor:
                         
                         self.orders_for_renewal.append(renewal_info)
                         successful_deletions.append(order.id)
-                        logger.info(f"    ✅ Order {order.id} marked for renewal")
+                        
+                        # Increment deletions counter since this deletion was successful
+                        deletions_made += 1
+                        logger.info(f"    ✅ Order {order.id} marked for renewal (total deletions: {deletions_made})")
                     else:
                         logger.error(f"    ❌ Database update failed for order {order.id}")
+                        # Don't increment deletions_made since we skip database update on failure
                 else:
                     # Deletion failed - still 4 or more orders
                     logger.error(f"    ❌ Deletion FAILED! Order count: {order_count} >= 4")
                     logger.error(f"    ⚠️  BullX still shows {order_count} orders - order was not deleted")
                     logger.error(f"    ⚠️  Skipping database update and renewal for order {order.id}")
+                    # Don't increment deletions_made since deletion failed
             
             logger.info(f"  ✅ Successfully processed {len(successful_deletions)} orders for deletion")
             
@@ -2200,7 +2228,8 @@ class EnhancedOrderProcessor:
     
     async def _process_individual_expired_orders(self, profile_name: str) -> Dict:
         """
-        Process individual expired orders: Delete from BullX, update to COMPLETED, mark for renewal.
+        Process individual expired orders: Delete from BullX, update to EXPIRED, mark for renewal.
+        Handles row index shifting by tracking deletions and adjusting indices.
         
         Args:
             profile_name: Chrome profile name
@@ -2217,31 +2246,44 @@ class EnhancedOrderProcessor:
             logger.info(f"⏰ PROCESSING {len(self.individual_expired_orders)} INDIVIDUAL EXPIRED ORDERS")
             logger.info(f"{'='*80}")
             
+            # Sort expired orders by row_index (ascending) to process top-to-bottom
+            # This ensures we can accurately track and adjust for row shifts
+            expired_orders_sorted = sorted(self.individual_expired_orders, 
+                                          key=lambda x: x['order_info']['row_index'])
+            
+            # Track deletions to adjust row indices as rows shift up
+            deletions_made = 0
             orders_processed = 0
             
-            for expired_order_dict in self.individual_expired_orders:
+            for expired_order_dict in expired_orders_sorted:
                 try:
                     order = expired_order_dict['order']
                     order_info = expired_order_dict['order_info']
                     coin = expired_order_dict['coin']
                     button_index = order_info['button_index']
-                    row_index = order_info['row_index']
+                    original_row_index = order_info['row_index']
+                    
+                    # Adjust row index based on previous deletions (rows shift up)
+                    adjusted_row_index = original_row_index - deletions_made
                     
                     logger.info(f"\n📝 Processing expired order: ID {order.id} (Bracket {order.bracket_id})")
                     logger.info(f"   Coin: {coin.name or coin.address}")
+                    logger.info(f"   Original row: {original_row_index}, Adjusted row: {adjusted_row_index}, Deletions made: {deletions_made}")
                     
                     # Step 1: Re-click filter button
                     filter_success = await self._click_coin_filter_button(profile_name, button_index)
                     if not filter_success:
                         logger.error(f"   ❌ Failed to click filter button - skipping")
+                        # Don't increment deletions_made since deletion didn't happen
                         continue
                     
-                    # Step 2: Delete from BullX
+                    # Step 2: Delete from BullX using adjusted row index
                     logger.info(f"   🗑️  Deleting expired order from BullX...")
-                    deletion_success = await self._delete_bullx_entry(profile_name, button_index, row_index)
+                    deletion_success = await self._delete_bullx_entry(profile_name, button_index, adjusted_row_index)
                     
                     if not deletion_success:
                         logger.error(f"   ❌ Failed to delete from BullX - skipping")
+                        # Don't increment deletions_made since deletion didn't happen
                         continue
                     
                     # Wait for deletion to process
@@ -2253,6 +2295,7 @@ class EnhancedOrderProcessor:
                     
                     if not db_success:
                         logger.error(f"   ❌ Failed to update database - skipping")
+                        # Don't increment deletions_made since we skip database update on failure
                         continue
                     
                     logger.info(f"   ✅ Order {order.id} marked as EXPIRED")
@@ -2264,7 +2307,7 @@ class EnhancedOrderProcessor:
                         'coin_name': coin.name,
                         'parsed_data': order_info['parsed_data'],
                         'button_index': button_index,
-                        'row_index': row_index,
+                        'row_index': original_row_index,  # Store original for reference
                         'original_bracket': coin.bracket,
                         'bracket_sub_id': order.bracket_id,
                         'profile_name': profile_name,
@@ -2272,15 +2315,18 @@ class EnhancedOrderProcessor:
                     }
                     
                     self.orders_for_renewal.append(renewal_info)
+                    
+                    # Increment deletions counter since this deletion was successful
+                    deletions_made += 1
                     orders_processed += 1
-                    logger.info(f"   ✅ Order {order.id} marked for renewal")
+                    logger.info(f"   ✅ Order {order.id} marked for renewal (total deletions: {deletions_made})")
                     
                 except Exception as e:
                     logger.error(f"   💥 Error processing individual expired order: {e}")
                     continue
             
             logger.info(f"\n{'='*80}")
-            logger.info(f"✅ INDIVIDUAL EXPIRED ORDERS COMPLETED: {orders_processed}/{len(self.individual_expired_orders)}")
+            logger.info(f"✅ INDIVIDUAL EXPIRED ORDERS COMPLETED: {orders_processed}/{len(expired_orders_sorted)}")
             logger.info(f"{'='*80}")
             
             return {"orders_processed": orders_processed}
@@ -2340,6 +2386,18 @@ class EnhancedOrderProcessor:
                         logger.error(f"   ❌ Failed to cancel all orders")
                         expired_details.append(coin_detail)
                         continue
+                    
+                    # Step 1.5: Delete all BullX entries for this coin
+                    logger.info(f"   🗑️  Deleting all BullX entries...")
+                    delete_success = await self._delete_all_bullx_entries_for_coin(profile_name, button_index)
+                    
+                    if delete_success:
+                        logger.info(f"   ✅ Successfully deleted all BullX entries")
+                        # After deleting all entries for this coin, the filter button disappears
+                        # Reset filter tracking as button indices have shifted
+                        self.current_selected_filter = None
+                    else:
+                        logger.warning(f"   ⚠️  Failed to delete all BullX entries (continuing anyway)")
                     
                     # Step 2: Sell all remaining coins
                     logger.info(f"   💰 Step 2: Selling all remaining coins...")
@@ -2401,21 +2459,29 @@ class EnhancedOrderProcessor:
                 logger.error(f"      ❌ Failed to click filter button")
                 return False
             
-            # Find and click the Cancel All button
-            cancel_all_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button/span"
+            # Correct XPATH for Cancel All button
+            cancel_all_span_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button/span"
+            cancel_all_button_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button"
             
             try:
-                # Try to find the button or its parent
+                # Try to find the span or button element
+                cancel_button = None
                 try:
+                    # Try span first
                     cancel_button = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.XPATH, cancel_all_xpath))
+                        EC.element_to_be_clickable((By.XPATH, cancel_all_span_xpath))
                     )
+                    logger.info(f"      📍 Found Cancel All span element")
                 except:
                     # Try parent button element
-                    cancel_all_button_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button"
                     cancel_button = WebDriverWait(driver, 5).until(
                         EC.element_to_be_clickable((By.XPATH, cancel_all_button_xpath))
                     )
+                    logger.info(f"      📍 Found Cancel All button element")
+                
+                if not cancel_button:
+                    logger.error(f"      ❌ Cancel All button not found")
+                    return False
                 
                 # Scroll into view
                 driver.execute_script("arguments[0].scrollIntoView(true);", cancel_button)
@@ -2431,7 +2497,7 @@ class EnhancedOrderProcessor:
                 return True
                 
             except TimeoutException:
-                logger.error(f"      ❌ Cancel All button not found")
+                logger.error(f"      ❌ Cancel All button not found (timeout)")
                 return False
             except Exception as e:
                 logger.error(f"      💥 Error clicking Cancel All button: {e}")
@@ -2465,15 +2531,18 @@ class EnhancedOrderProcessor:
             time.sleep(2)
             
             # Click Sell button
-            sell_button_xpath = "//*[@id='root']/div[1]/div[2]/main/div/div[2]/aside/div/div[3]/div/div/div/div[1]/div[3]/div[1]/div/div/label[2]/div"
-            
+            sell_button_xpath = "//div[@title = 'Sell' and contains(text(), 'Sell')]"
+
             try:
                 sell_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, sell_button_xpath))
+                    EC.presence_of_element_located((By.XPATH, sell_button_xpath))
                 )
-                sell_button.click()
-                logger.info(f"      ✅ Clicked Sell button")
-                time.sleep(1)
+                if sell_button.is_selected():
+                    pass
+                else:
+                    sell_button.click()
+                    logger.info(f"      ✅ Clicked Sell button")
+                    time.sleep(1)
             except Exception as e:
                 logger.error(f"      ❌ Failed to click Sell button: {e}")
                 return False
@@ -2560,6 +2629,72 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"      💥 Error updating orders to expired: {e}")
             return 0
+    
+    async def _delete_all_bullx_entries_for_coin(self, profile_name: str, button_index: int) -> bool:
+        """
+        Delete all BullX entries for a specific coin by repeatedly deleting row 1.
+        After each deletion, rows shift up, so we always delete row 1 until none remain.
+        
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index for the coin
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+            
+            # Re-click filter button to ensure correct view
+            filter_success = await self._click_coin_filter_button(profile_name, button_index)
+            if not filter_success:
+                logger.error(f"      ❌ Failed to click filter button")
+                return False
+            
+            # XPATH for delete button - ALWAYS row 1 since rows shift after deletion
+            # After canceling, entries remain and need to be deleted one by one
+            delete_row_1_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[1]/div[11]/div/button"
+            
+            try:
+                # Keep clicking delete on row 1 until no more orders remain
+                max_attempts = 10  # Safety limit
+                attempts = 0
+                
+                while attempts < max_attempts:
+                    try:
+                        # Always try to find row 1's delete button (since rows shift after each deletion)
+                        delete_button = WebDriverWait(driver, 3).until(
+                            EC.element_to_be_clickable((By.XPATH, delete_row_1_xpath))
+                        )
+                        
+                        # Scroll into view
+                        driver.execute_script("arguments[0].scrollIntoView(true);", delete_button)
+                        time.sleep(0.3)
+                        
+                        # Click the delete button
+                        delete_button.click()
+                        logger.info(f"      🗑️  Deleted row 1 (attempt {attempts + 1})")
+                        
+                        # Wait for deletion to process and rows to shift
+                        time.sleep(1.5)
+                        
+                        attempts += 1
+                        
+                    except (TimeoutException, NoSuchElementException):
+                        # No more delete buttons found - all orders deleted
+                        logger.info(f"      ✅ All BullX entries deleted after {attempts} deletions")
+                        return True
+                
+                logger.warning(f"      ⚠️  Reached maximum deletion attempts ({max_attempts})")
+                return True  # Consider it success even if we hit the limit
+                
+            except Exception as e:
+                logger.error(f"      💥 Error during bulk deletion: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"      💥 Error in _delete_all_bullx_entries_for_coin: {e}")
+            return False
     
     async def _delete_bullx_entry(self, profile_name: str, button_index: int, row_index: int) -> bool:
         """Delete entry from BullX using the specified XPATH"""
@@ -2727,7 +2862,7 @@ class EnhancedOrderProcessor:
                 "error": str(e)
             }
     
-    def _generate_processing_summary(self, check_result: Dict, renewal_results: Dict, expired_results: Dict = None) -> str:
+    def _generate_processing_summary(self, check_result: Dict, renewal_results: Dict, expired_results: Dict = None, individual_expired_results: Dict = None) -> str:
         """Generate comprehensive processing summary"""
         try:
             summary_lines = []
@@ -2740,10 +2875,15 @@ class EnhancedOrderProcessor:
             summary_lines.append(f"📋 Orders Checked: {total_checked}")
             summary_lines.append(f"🎯 TP Conditions Detected: {tp_detected}")
             
-            # Expired coins summary
+            # Expired coins summary (cancel all + sell)
             if expired_results:
                 expired_coins = expired_results.get("coins_processed", 0)
-                summary_lines.append(f"🚨 Expired Coins Processed: {expired_coins}")
+                summary_lines.append(f"🚨 Expired Coins Processed (cancel all): {expired_coins}")
+            
+            # Individual expired orders summary
+            if individual_expired_results:
+                individual_expired = individual_expired_results.get("orders_processed", 0)
+                summary_lines.append(f"⏰ Individual Expired Orders Renewed: {individual_expired}")
             
             # Renewal summary
             orders_replaced = renewal_results.get("orders_replaced", 0)

@@ -553,6 +553,30 @@ class DatabaseManager:
         finally:
             db.close()
     
+    def get_active_order_by_bracket(self, coin_id: int, bracket_id: int, profile_name: str) -> Optional[Order]:
+        """
+        Get active order by coin_id, bracket_id, and profile_name.
+        Used to prevent duplicate orders during renewal.
+        
+        Args:
+            coin_id: Coin database ID
+            bracket_id: Bracket ID (1-4)
+            profile_name: Profile name
+            
+        Returns:
+            Active order if exists, None otherwise
+        """
+        db = self.SessionLocal()
+        try:
+            return db.query(Order).filter(
+                Order.coin_id == coin_id,
+                Order.bracket_id == bracket_id,
+                Order.profile_name == profile_name,
+                Order.status == "ACTIVE"
+            ).first()
+        finally:
+            db.close()
+    
     def get_active_orders_summary(self, profile_name: str) -> dict:
         """Get a summary of active orders grouped by coin and bracket_id"""
         db = self.SessionLocal()

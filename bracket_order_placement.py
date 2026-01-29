@@ -189,6 +189,23 @@ class BracketOrderPlacer:
             else:
                 logger.info(f"📊 Initial row count in Orders tab: {initial_row_count}")
             
+
+            # Click Sell button
+            buy_button_xpath =  "//div[@title = 'Buy' and contains(text(), 'Buy')]"
+            
+            try:
+                buy_button = WebDriverWait(driver, 2).until(
+                    EC.presence_of_element_located((By.XPATH, buy_button_xpath))
+                )
+                if buy_button.is_selected():
+                    pass
+                else:
+                    buy_button.click()
+                    logger.info(f"      ✅ Clicked Buy button")
+                    time.sleep(1)
+            except Exception as e:
+                logger.error(f"      ❌ Failed to click Buy button: {e}")
+                return False
             # COMMENTED OUT: Wallet selection (no longer used for identification)
             # if not self._select_wallets_for_bracket_sub_id(driver, bracket_id):
             #     return {"success": False, "error": f"Failed to select wallets for bracket sub ID {bracket_id}"}
@@ -221,6 +238,15 @@ class BracketOrderPlacer:
             # Confirm the order
             if not self._confirm_order(driver, token_name, bracket, bracket_id):
                 return {"success": False, "error": "Failed to confirm order"}
+            
+            # VALIDATION: Check for duplicate bracket_id before creating order
+            # This prevents database inconsistencies from power outages or interruptions
+            existing_order = db_manager.get_active_order_by_bracket(coin.id, bracket_id, profile_name)
+            if existing_order:
+                logger.error(f"❌ DUPLICATE PREVENTION: Order already exists for bracket_id {bracket_id}")
+                logger.error(f"   Existing Order ID: {existing_order.id}, Created: {existing_order.created_at}")
+                logger.error(f"   Skipping order creation to prevent duplicate")
+                return {"success": False, "error": f"Duplicate order detected: bracket_id {bracket_id} already exists"}
             
             # Save order to database
             order_data = {
@@ -398,7 +424,7 @@ class BracketOrderPlacer:
             limit_price_input.send_keys(Keys.CONTROL + "A")
             limit_price_input.send_keys(Keys.DELETE)
             limit_price_input.send_keys(str(entry_market_cap))
-            
+
             return True
             
         except Exception as e:
@@ -435,6 +461,7 @@ class BracketOrderPlacer:
             for strategy in strategies_names:
                 try:
                     strategy_name_found = strategy.find_element(By.XPATH, "./div/div/span").text
+
                     if strategy_name_found == f"{strategy_name}":
                         strategy_found = True
                         
@@ -454,9 +481,9 @@ class BracketOrderPlacer:
                             # Strategy is not selected, look for Select button
                             try:
                                 select_button = strategy.find_element(By.XPATH, "./div/div[2]/button[2]/span[contains(text(), 'Select')]")
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_button)
                                 select_button.click()
                                 logger.info(f"✅ Selected auto-sell strategy '{strategy_name}'")
-                                time.sleep(2)
                                 
                             except NoSuchElementException:
                                 logger.error(f"❌ Neither 'Select' nor 'Disable' button found for strategy '{strategy_name}'")

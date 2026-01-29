@@ -154,7 +154,8 @@ dmypy.json
 cython_debug/
 
 # Console output log file
-console_output.txt
+# Log files directory
+logs/
 
 # Database
 *.db

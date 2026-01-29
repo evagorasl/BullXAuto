@@ -177,6 +177,15 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=False,  # Set to False to prevent reload loops, True for development
+        reload=True,
+        reload_excludes=[
+            "logs/*",           # Ignore log files
+            "*.db",             # Ignore database files
+            "*.log",            # Ignore any log files
+            "screenshots/*",    # Ignore screenshot directory
+            "__pycache__/*",    # Ignore Python cache
+            "*.pyc",            # Ignore compiled Python files
+            ".claude/*"         # Ignore Claude settings
+        ],
         log_level="info"
     )

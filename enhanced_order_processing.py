@@ -2802,6 +2802,44 @@ class EnhancedOrderProcessor:
             logger.error(f"      💥 Error detecting orphaned orders: {e}")
             return []
 
+    def _extract_bracket_id_from_bullx_order(self, parsed_data: Dict[str, Any], bracket_entries: List[float]) -> Optional[int]:
+        """
+        Extract bracket_id directly from BullX order data without matching to database.
+        Parses trigger condition to get entry price, then matches to bracket entries.
+
+        Args:
+            parsed_data: Parsed BullX order data
+            bracket_entries: List of bracket entry prices [entry1, entry2, entry3, entry4]
+
+        Returns:
+            Bracket sub-id (1-4) or None if cannot determine
+        """
+        try:
+            trigger_condition = parsed_data.get('trigger_condition', '')
+
+            # Parse entry price from trigger condition
+            entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+
+            if not entry_price:
+                # Not an entry order (might be TP/SL order)
+                return None
+
+            # Match entry price to bracket entries (with tolerance)
+            tolerance = 1000  # 1000 unit tolerance
+            for i, bracket_entry in enumerate(bracket_entries):
+                difference = abs(entry_price - bracket_entry)
+                if difference <= tolerance:
+                    bracket_id = i + 1  # Convert 0-based to 1-based
+                    logger.debug(f"     Matched entry ${entry_price:,.0f} to bracket_id {bracket_id} (entry ${bracket_entry:,.0f})")
+                    return bracket_id
+
+            logger.warning(f"     Could not match entry price ${entry_price:,.0f} to any bracket entry")
+            return None
+
+        except Exception as e:
+            logger.error(f"     Error extracting bracket_id from BullX order: {e}")
+            return None
+
     async def _reconcile_database_with_bullx(self, coin: Any, coin_orders: List[Dict], profile_name: str) -> int:
         """
         Reconcile database with BullX by marking orders as CANCELLED if they exist in DB but not on BullX.
@@ -2829,15 +2867,26 @@ class EnhancedOrderProcessor:
                 logger.info(f"     No ACTIVE orders in database for this coin")
                 return 0
 
-            # Build a set of bracket_ids that exist on BullX
+            # Get bracket entries for this coin
+            if not coin.bracket or coin.bracket not in BRACKET_CONFIG:
+                logger.error(f"     Invalid bracket {coin.bracket} for coin {coin.name}")
+                return 0
+
+            bracket_config = BRACKET_CONFIG[coin.bracket]
+            bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
+
+            logger.info(f"     Using bracket {coin.bracket} with entries: {bracket_entries}")
+
+            # Build a set of bracket_ids that exist on BullX (extract directly, don't match to DB)
             bullx_bracket_ids = set()
             for bullx_order in coin_orders:
-                # Try to identify this order to get its bracket_id
-                order_match = self._identify_order(bullx_order['parsed_data'], profile_name)
-                if order_match and order_match.get('status') == 'success':
-                    bracket_id = order_match.get('bracket_id')
-                    if bracket_id:
-                        bullx_bracket_ids.add(bracket_id)
+                # Extract bracket_id directly from trigger condition
+                bracket_id = self._extract_bracket_id_from_bullx_order(
+                    bullx_order['parsed_data'],
+                    bracket_entries
+                )
+                if bracket_id:
+                    bullx_bracket_ids.add(bracket_id)
 
             logger.info(f"     BullX has {len(bullx_bracket_ids)} orders: {sorted(bullx_bracket_ids)}")
             logger.info(f"     Database has {len(active_db_orders)} ACTIVE orders")

@@ -2768,9 +2768,13 @@ class EnhancedOrderProcessor:
             List of orphaned order dictionaries
         """
         try:
-            # Get all ACTIVE orders from database for this coin
-            db_orders = db_manager.get_orders_by_coin(coin.id, profile_name)
-            active_db_orders = [order for order in db_orders if order.status == "ACTIVE"]
+            # Get all orders from database for this coin
+            db_orders = db_manager.get_orders_by_coin(coin.id)
+            # Filter by profile and ACTIVE status
+            active_db_orders = [
+                order for order in db_orders
+                if order.status == "ACTIVE" and order.profile_name == profile_name
+            ]
 
             # If counts match, no orphans
             if len(coin_orders) == len(active_db_orders):
@@ -2812,9 +2816,13 @@ class EnhancedOrderProcessor:
             Number of orders reconciled (marked as CANCELLED)
         """
         try:
-            # Get all ACTIVE orders from database for this coin
-            db_orders = db_manager.get_orders_by_coin(coin.id, profile_name)
-            active_db_orders = [order for order in db_orders if order.status == "ACTIVE"]
+            # Get all orders from database for this coin
+            db_orders = db_manager.get_orders_by_coin(coin.id)
+            # Filter by profile and ACTIVE status
+            active_db_orders = [
+                order for order in db_orders
+                if order.status == "ACTIVE" and order.profile_name == profile_name
+            ]
 
             # If no active orders in DB, nothing to reconcile
             if not active_db_orders:

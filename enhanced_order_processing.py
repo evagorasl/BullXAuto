@@ -250,6 +250,14 @@ class EnhancedOrderProcessor:
             else:
                 logger.info(f"  ✅ No orphaned orders detected")
 
+            # PRIORITY 0.5: Reconcile database with BullX (mark cancelled orders)
+            logger.info(f"  🔍 PRIORITY 0.5: Reconciling database with BullX...")
+            reconciled_count = await self._reconcile_database_with_bullx(coin, coin_orders, profile_name)
+            if reconciled_count > 0:
+                logger.warning(f"  ⚠️  Reconciled {reconciled_count} orders (marked as CANCELLED in database)")
+            else:
+                logger.info(f"  ✅ Database already in sync with BullX")
+
             # PRIORITY 1: Check for SL hit + any expired condition
             logger.info(f"  🔍 PRIORITY 1: Checking for SL hit + any expired...")
             if self._check_sl_with_any_expired(coin_orders):
@@ -2789,6 +2797,72 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"      💥 Error detecting orphaned orders: {e}")
             return []
+
+    async def _reconcile_database_with_bullx(self, coin: Any, coin_orders: List[Dict], profile_name: str) -> int:
+        """
+        Reconcile database with BullX by marking orders as CANCELLED if they exist in DB but not on BullX.
+        This fixes desynchronization issues where orders were deleted from BullX but remain ACTIVE in database.
+
+        Args:
+            coin: Coin object from database
+            coin_orders: List of orders from BullX for this coin
+            profile_name: Profile name
+
+        Returns:
+            Number of orders reconciled (marked as CANCELLED)
+        """
+        try:
+            # Get all ACTIVE orders from database for this coin
+            db_orders = db_manager.get_orders_by_coin(coin.id, profile_name)
+            active_db_orders = [order for order in db_orders if order.status == "ACTIVE"]
+
+            # If no active orders in DB, nothing to reconcile
+            if not active_db_orders:
+                logger.info(f"     No ACTIVE orders in database for this coin")
+                return 0
+
+            # Build a set of bracket_ids that exist on BullX
+            bullx_bracket_ids = set()
+            for bullx_order in coin_orders:
+                # Try to identify this order to get its bracket_id
+                order_match = self._identify_order(bullx_order['parsed_data'], profile_name)
+                if order_match and order_match.get('status') == 'success':
+                    bracket_id = order_match.get('bracket_id')
+                    if bracket_id:
+                        bullx_bracket_ids.add(bracket_id)
+
+            logger.info(f"     BullX has {len(bullx_bracket_ids)} orders: {sorted(bullx_bracket_ids)}")
+            logger.info(f"     Database has {len(active_db_orders)} ACTIVE orders")
+
+            # Check each database ACTIVE order to see if it exists on BullX
+            reconciled_count = 0
+            for db_order in active_db_orders:
+                bracket_id = db_order.bracket_id
+
+                # If this bracket_id doesn't exist on BullX, mark as CANCELLED
+                if bracket_id not in bullx_bracket_ids:
+                    logger.warning(f"     🔄 RECONCILIATION: Order {db_order.id} (bracket_id {bracket_id}) exists in DB but NOT on BullX")
+                    logger.warning(f"        Marking as CANCELLED to allow replacement...")
+
+                    # Mark as CANCELLED in database
+                    success = db_manager.mark_order_for_replacement(db_order.id, "CANCELLED")
+
+                    if success:
+                        logger.info(f"        ✅ Order {db_order.id} marked as CANCELLED")
+                        reconciled_count += 1
+                    else:
+                        logger.error(f"        ❌ Failed to mark order {db_order.id} as CANCELLED")
+
+            if reconciled_count > 0:
+                logger.info(f"     ✅ Reconciled {reconciled_count} orders with BullX state")
+            else:
+                logger.info(f"     ✅ All database orders match BullX (no reconciliation needed)")
+
+            return reconciled_count
+
+        except Exception as e:
+            logger.error(f"      💥 Error reconciling database with BullX: {e}")
+            return 0
 
     async def _get_button_row_count(self, profile_name: str, button_index: int) -> int:
         """

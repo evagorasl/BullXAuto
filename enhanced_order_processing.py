@@ -517,12 +517,14 @@ class EnhancedOrderProcessor:
                     logger.error(f"    ❌ Failed to click filter button for {coin_name} - skipping deletion")
                     continue
                 
-                # Try to delete entry from BullX using adjusted row index
+                # Try to delete entry from BullX using adjusted row index (with verification)
                 logger.info(f"    🗑️  Attempting to delete BullX entry...")
                 deletion_clicked = await self._delete_bullx_entry(
-                    profile_name, 
-                    button_index, 
-                    adjusted_row_index
+                    profile_name,
+                    button_index,
+                    adjusted_row_index,
+                    expected_coin_address=coin.address,
+                    expected_bracket_id=order.bracket_id
                 )
                 
                 if not deletion_clicked:
@@ -2080,9 +2082,15 @@ class EnhancedOrderProcessor:
                 return
             
             logger.info(f"    🪙 Found coin: {coin.name or coin.address} (Bracket: {coin.bracket})")
-            
-            # Try to delete entry from BullX first
-            deletion_success = await self._delete_bullx_entry(order.profile_name, button_index, row_index)
+
+            # Try to delete entry from BullX first (with verification)
+            deletion_success = await self._delete_bullx_entry(
+                order.profile_name,  # type: ignore
+                button_index,
+                row_index,
+                expected_coin_address=coin.address,  # type: ignore
+                expected_bracket_id=order.bracket_id  # type: ignore
+            )
             
             if not deletion_success:
                 logger.error(f"    ❌ BullX deletion failed - skipping database update for order {order.id}")
@@ -2296,9 +2304,13 @@ class EnhancedOrderProcessor:
                     rows_before = await self._get_button_row_count(profile_name, button_index)
                     logger.info(f"   📊 Rows before deletion: {rows_before}")
 
-                    # Step 3: Delete from BullX using adjusted row index
+                    # Step 3: Delete from BullX using adjusted row index (with verification)
                     logger.info(f"   🗑️  Deleting expired order from BullX...")
-                    deletion_success = await self._delete_bullx_entry(profile_name, button_index, adjusted_row_index)
+                    deletion_success = await self._delete_bullx_entry(
+                        profile_name, button_index, adjusted_row_index,
+                        expected_coin_address=coin.address,
+                        expected_bracket_id=order.bracket_id
+                    )
 
                     if not deletion_success:
                         logger.error(f"   ❌ Failed to click delete button - skipping")
@@ -2816,42 +2828,141 @@ class EnhancedOrderProcessor:
             logger.error(f"      💥 Error getting row count: {e}")
             return -1
 
-    async def _delete_bullx_entry(self, profile_name: str, button_index: int, row_index: int) -> bool:
-        """Delete entry from BullX using the specified XPATH"""
+    async def _verify_row_matches_coin(self, profile_name: str, row_index: int, expected_coin_address: str, expected_bracket_id: Optional[int] = None) -> bool:
+        """
+        Verify that the row at row_index matches the expected coin and bracket_id.
+        This prevents deleting the wrong order if button indices have shifted.
+
+        Args:
+            profile_name: Chrome profile name
+            row_index: Row index to verify (1-based)
+            expected_coin_address: Expected coin address
+            expected_bracket_id: Optional bracket sub ID for additional verification
+
+        Returns:
+            True if row matches expected coin, False otherwise
+        """
         try:
             driver = self.driver_manager.get_driver(profile_name)
-            
+
+            # Get the row element
+            row_xpath = f"//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[{row_index}]"
+
+            try:
+                row_element = driver.find_element(By.XPATH, row_xpath)
+
+                # Get row text and href
+                row_text = row_element.text.strip()
+                href = row_element.get_attribute("href")
+
+                if not href:
+                    logger.error(f"    ❌ No href found for row {row_index}")
+                    return False
+
+                # Create row dict for parsing
+                row_dict = {
+                    "main_text": row_text,
+                    "href": href
+                }
+
+                # Parse row data
+                parsed_data = self._parse_row_data(row_dict)
+                if not parsed_data:
+                    logger.error(f"    ❌ Could not parse row {row_index} for verification")
+                    return False
+
+                # Get coin address from href (last part of URL)
+                row_coin_address = href.split('/')[-1] if '/' in href else href
+
+                # Get trigger condition to verify bracket_id
+                trigger_condition = parsed_data.get('trigger_condition', '')
+
+                # Verify coin address matches
+                if row_coin_address.lower() != expected_coin_address.lower():
+                    logger.error(f"    ❌ ROW VERIFICATION FAILED: Wrong coin!")
+                    logger.error(f"       Expected coin: {expected_coin_address}")
+                    logger.error(f"       Row coin: {row_coin_address}")
+                    logger.error(f"       🚨 THIS WOULD HAVE DELETED THE WRONG ORDER!")
+                    return False
+
+                logger.info(f"    ✅ Row verification passed:")
+                logger.info(f"       Coin address matches: {row_coin_address}")
+                logger.info(f"       Trigger condition: {trigger_condition}")
+                if expected_bracket_id:
+                    logger.info(f"       Expected bracket_id: {expected_bracket_id}")
+
+                return True
+
+            except Exception as e:
+                logger.error(f"    ❌ Error finding row {row_index} for verification: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"    💥 Error verifying row: {e}")
+            return False
+
+    async def _delete_bullx_entry(self, profile_name: str, button_index: int, row_index: int,
+                                  expected_coin_address: Optional[str] = None, expected_bracket_id: Optional[int] = None) -> bool:
+        """
+        Delete entry from BullX using the specified XPATH.
+        Optionally verifies the row matches expected coin before deleting.
+
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index
+            row_index: Row index to delete (1-based)
+            expected_coin_address: Optional coin address for verification
+            expected_bracket_id: Optional bracket sub ID for verification
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+
+            # CRITICAL SAFETY CHECK: Verify we're deleting the right order
+            if expected_coin_address:
+                logger.info(f"    🔍 Verifying row {row_index} before deletion...")
+                verification_passed = await self._verify_row_matches_coin(
+                    profile_name, row_index, expected_coin_address, expected_bracket_id
+                )
+
+                if not verification_passed:
+                    logger.error(f"    ❌ DELETION BLOCKED: Row verification failed!")
+                    logger.error(f"    🛡️  This prevented deleting the wrong order")
+                    return False
+
             # Construct the XPATH for the specific row
             xpath = f"//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[{row_index}]/div[11]/div/button"
-            
+
             logger.info(f"    🗑️  Deleting BullX entry for row {row_index}")
-            
+
             try:
                 # Wait for the element to be clickable
                 delete_button = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.XPATH, xpath))
                 )
-                
+
                 # Scroll into view if needed
                 driver.execute_script("arguments[0].scrollIntoView(true);", delete_button)
                 time.sleep(0.5)
-                
+
                 # Click the button
                 delete_button.click()
                 logger.info(f"    ✅ Successfully clicked delete button for row {row_index}")
-                
+
                 # Wait for deletion to process
                 time.sleep(1)
-                
+
                 return True
-                
+
             except TimeoutException:
                 logger.error(f"    ❌ Delete button not found or not clickable for row {row_index}")
                 return False
             except Exception as e:
                 logger.error(f"    💥 Error clicking delete button: {e}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"    💥 Error deleting BullX entry: {e}")
             return False

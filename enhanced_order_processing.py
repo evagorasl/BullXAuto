@@ -235,7 +235,21 @@ class EnhancedOrderProcessor:
             if not coin:
                 logger.warning(f"  ❌ Could not find coin for token: {token}")
                 return
-            
+
+            # PRIORITY 0: Check for orphaned orders (on BullX but not in database)
+            logger.info(f"  🔍 PRIORITY 0: Checking for orphaned orders...")
+            orphaned_orders = await self._detect_orphaned_orders(coin, coin_orders, profile_name)
+            if orphaned_orders:
+                logger.critical(f"  🚨 ORPHANED ORDERS DETECTED: {len(orphaned_orders)} orders on BullX have no matching ACTIVE database record")
+                logger.critical(f"     These are likely from failed deletions - they should NOT be renewed")
+                for orphan in orphaned_orders:
+                    logger.critical(f"       • Row {orphan['row_index']}: {orphan['parsed_data'].get('trigger_condition')}")
+                    logger.critical(f"         This order exists on BullX but not in database as ACTIVE")
+                # For now, just log the orphans - manual cleanup recommended
+                # Future: Could auto-delete these orphaned orders
+            else:
+                logger.info(f"  ✅ No orphaned orders detected")
+
             # PRIORITY 1: Check for SL hit + any expired condition
             logger.info(f"  🔍 PRIORITY 1: Checking for SL hit + any expired...")
             if self._check_sl_with_any_expired(coin_orders):
@@ -2277,19 +2291,39 @@ class EnhancedOrderProcessor:
                         # Don't increment deletions_made since deletion didn't happen
                         continue
                     
-                    # Step 2: Delete from BullX using adjusted row index
+                    # Step 2: Get row count BEFORE deletion for verification
+                    logger.info(f"   📊 Getting row count before deletion...")
+                    rows_before = await self._get_button_row_count(profile_name, button_index)
+                    logger.info(f"   📊 Rows before deletion: {rows_before}")
+
+                    # Step 3: Delete from BullX using adjusted row index
                     logger.info(f"   🗑️  Deleting expired order from BullX...")
                     deletion_success = await self._delete_bullx_entry(profile_name, button_index, adjusted_row_index)
 
                     if not deletion_success:
-                        logger.error(f"   ❌ Failed to delete from BullX - skipping")
+                        logger.error(f"   ❌ Failed to click delete button - skipping")
                         # Don't increment deletions_made since deletion didn't happen
                         continue
 
                     # Wait for deletion to process
-                    time.sleep(2)
+                    time.sleep(3)
 
-                    # CRITICAL: Mark as EXPIRED IMMEDIATELY after BullX deletion
+                    # Step 4: VERIFY deletion worked by checking row count
+                    logger.info(f"   🔍 Verifying deletion...")
+                    rows_after = await self._get_button_row_count(profile_name, button_index)
+                    logger.info(f"   📊 Rows after deletion: {rows_after}")
+
+                    if rows_after != rows_before - 1:
+                        logger.error(f"   ❌ DELETION VERIFICATION FAILED!")
+                        logger.error(f"      Expected rows: {rows_before - 1}, Actual rows: {rows_after}")
+                        logger.error(f"      Order may still exist on BullX - NOT marking as EXPIRED")
+                        logger.error(f"      This prevents orphaned orders and duplicate renewals")
+                        # Don't mark as EXPIRED, don't renew
+                        continue
+
+                    logger.info(f"   ✅ Deletion verified: {rows_before} → {rows_after} rows")
+
+                    # Step 5: CRITICAL - Mark as EXPIRED IMMEDIATELY after verified BullX deletion
                     # This ensures if crash happens, at least old order is marked properly
                     # Using atomic transaction to prevent partial updates
                     logger.info(f"   📝 Marking order {order.id} as EXPIRED immediately...")
@@ -2303,8 +2337,8 @@ class EnhancedOrderProcessor:
                         continue
 
                     logger.info(f"   ✅ Order {order.id} marked as EXPIRED")
-                    
-                    # Step 4: Mark for renewal
+
+                    # Step 6: Mark for renewal
                     renewal_info = {
                         'order_id': order.id,
                         'coin_address': coin.address,
@@ -2699,7 +2733,89 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"      💥 Error in _delete_all_bullx_entries_for_coin: {e}")
             return False
-    
+
+    async def _detect_orphaned_orders(self, coin: Any, coin_orders: List[Dict], profile_name: str) -> List[Dict]:
+        """
+        Detect orphaned orders: orders that exist on BullX but not in database as ACTIVE.
+        These are typically from failed deletions.
+
+        Args:
+            coin: Coin object from database
+            coin_orders: List of orders from BullX
+            profile_name: Profile name
+
+        Returns:
+            List of orphaned order dictionaries
+        """
+        try:
+            # Get all ACTIVE orders from database for this coin
+            db_orders = db_manager.get_orders_by_coin(coin.id, profile_name)
+            active_db_orders = [order for order in db_orders if order.status == "ACTIVE"]
+
+            # If counts match, no orphans
+            if len(coin_orders) == len(active_db_orders):
+                return []
+
+            # If more orders on BullX than in database, we likely have orphans
+            if len(coin_orders) > len(active_db_orders):
+                logger.warning(f"     BullX has {len(coin_orders)} orders, DB has {len(active_db_orders)} ACTIVE orders")
+
+                # Try to match each BullX order to a database order
+                orphaned = []
+                for bullx_order in coin_orders:
+                    # Try to identify this BullX order in the database
+                    order_match = self._identify_order(bullx_order['parsed_data'], profile_name)
+
+                    if not order_match or order_match.get('status') != 'success':
+                        # Could not match to any ACTIVE database order - it's orphaned
+                        orphaned.append(bullx_order)
+
+                return orphaned
+
+            return []
+
+        except Exception as e:
+            logger.error(f"      💥 Error detecting orphaned orders: {e}")
+            return []
+
+    async def _get_button_row_count(self, profile_name: str, button_index: int) -> int:
+        """
+        Get the current number of rows for a specific filter button.
+        Used to verify deletions worked correctly.
+
+        Args:
+            profile_name: Profile name
+            button_index: Filter button index
+
+        Returns:
+            Number of visible rows, or -1 if error
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+
+            # Click the filter button to ensure we're seeing the right orders
+            filter_success = await self._click_coin_filter_button(profile_name, button_index)
+            if not filter_success:
+                logger.error(f"      ❌ Failed to click filter button {button_index}")
+                return -1
+
+            # Wait a bit for the UI to update
+            time.sleep(1)
+
+            # Count visible rows using the same XPATH pattern as deletion
+            # Rows follow pattern: //*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[N]
+            base_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a"
+
+            # Find all matching rows
+            rows = driver.find_elements(By.XPATH, base_xpath)
+            row_count = len(rows)
+
+            return row_count
+
+        except Exception as e:
+            logger.error(f"      💥 Error getting row count: {e}")
+            return -1
+
     async def _delete_bullx_entry(self, profile_name: str, button_index: int, row_index: int) -> bool:
         """Delete entry from BullX using the specified XPATH"""
         try:

@@ -237,9 +237,23 @@ class EnhancedOrderProcessor:
                 logger.warning(f"  ❌ Could not find coin for token: {token}")
                 return
 
-            # PRIORITY 0: Check for orphaned orders (on BullX but not in database)
-            logger.info(f"  🔍 PRIORITY 0: Checking for orphaned orders...")
-            orphaned_orders = await self._detect_orphaned_orders(coin, coin_orders, profile_name)
+            # PRIORITY 0: Reconcile database with BullX (mark cancelled orders)
+            logger.info(f"  🔍 PRIORITY 0: Reconciling database with BullX...")
+            reconciled_count = await self._reconcile_database_with_bullx(coin, coin_orders, profile_name)
+            if reconciled_count > 0:
+                logger.warning(f"  ⚠️  Reconciled {reconciled_count} orders (marked as CANCELLED in database)")
+            else:
+                logger.info(f"  ✅ Database already in sync with BullX")
+
+            # PRIORITY 0.5: Two-phase order identification for ALL orders
+            # This prevents duplicate matches (same DB order matched multiple times)
+            logger.info(f"  🔍 PRIORITY 0.5: Identifying all orders (two-phase approach)...")
+            identification_results = await self._identify_all_orders_for_coin(coin, coin_orders, profile_name)
+
+            # PRIORITY 0.75: Check for orphaned orders (on BullX but not matched to database)
+            # Uses identification results instead of re-matching
+            logger.info(f"  🔍 PRIORITY 0.75: Checking for orphaned orders...")
+            orphaned_orders = self._detect_orphaned_orders_from_results(coin_orders, identification_results)
             if orphaned_orders:
                 logger.critical(f"  🚨 ORPHANED ORDERS DETECTED: {len(orphaned_orders)} orders on BullX have no matching ACTIVE database record")
                 logger.critical(f"     These are likely from failed deletions - they should NOT be renewed")
@@ -250,19 +264,6 @@ class EnhancedOrderProcessor:
                 # Future: Could auto-delete these orphaned orders
             else:
                 logger.info(f"  ✅ No orphaned orders detected")
-
-            # PRIORITY 0.5: Reconcile database with BullX (mark cancelled orders)
-            logger.info(f"  🔍 PRIORITY 0.5: Reconciling database with BullX...")
-            reconciled_count = await self._reconcile_database_with_bullx(coin, coin_orders, profile_name)
-            if reconciled_count > 0:
-                logger.warning(f"  ⚠️  Reconciled {reconciled_count} orders (marked as CANCELLED in database)")
-            else:
-                logger.info(f"  ✅ Database already in sync with BullX")
-
-            # PRIORITY 0.75: Two-phase order identification for ALL orders
-            # This prevents duplicate matches (same DB order matched multiple times)
-            logger.info(f"  🔍 PRIORITY 0.75: Identifying all orders (two-phase approach)...")
-            identification_results = await self._identify_all_orders_for_coin(coin, coin_orders, profile_name)
 
             # PRIORITY 1: Check for SL hit + any expired condition
             logger.info(f"  🔍 PRIORITY 1: Checking for SL hit + any expired...")
@@ -2745,6 +2746,38 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"      💥 Error in _delete_all_bullx_entries_for_coin: {e}")
             return False
+
+    def _detect_orphaned_orders_from_results(self, coin_orders: List[Dict], identification_results: Dict[int, Dict[str, Any]]) -> List[Dict]:
+        """
+        Detect orphaned orders using two-phase identification results.
+        Orphaned orders are those on BullX that couldn't be matched to any ACTIVE database order.
+
+        Args:
+            coin_orders: List of BullX orders for this coin
+            identification_results: Dict mapping row_index to identification result
+
+        Returns:
+            List of orphaned order dictionaries
+        """
+        try:
+            orphaned = []
+
+            for order_info in coin_orders:
+                row_index = order_info['row_index']
+
+                # Check if this order was matched during two-phase identification
+                match_result = identification_results.get(row_index)
+
+                if not match_result or not match_result.get('order'):
+                    # Order exists on BullX but couldn't be matched to database - it's orphaned
+                    orphaned.append(order_info)
+                    logger.debug(f"     Orphaned: Row {row_index} - no database match found")
+
+            return orphaned
+
+        except Exception as e:
+            logger.error(f"      💥 Error detecting orphaned orders from results: {e}")
+            return []
 
     async def _detect_orphaned_orders(self, coin: Any, coin_orders: List[Dict], profile_name: str) -> List[Dict]:
         """

@@ -1088,7 +1088,7 @@ class EnhancedOrderProcessor:
             logger.error(f"     Error in strong matching: {e}")
             return None
 
-    def _try_weak_matching(
+    def _try_order_amount_matching(
         self,
         parsed_data: Dict[str, Any],
         active_db_orders: List,
@@ -1096,7 +1096,8 @@ class EnhancedOrderProcessor:
         coin: Any
     ) -> Optional[Dict[str, Any]]:
         """
-        Try weak matching: expiry time match only.
+        Try order amount matching.
+        Matches BullX order_amount (4th column) to database order_amount.
         Only considers database orders NOT already matched.
 
         Args:
@@ -1109,39 +1110,82 @@ class EnhancedOrderProcessor:
             Match result dict or None if no match
         """
         try:
-            expiry = parsed_data.get('expiry', '')
-            trigger_condition = parsed_data.get('trigger_condition', '')
-
-            # Parse expiry to seconds
-            expiry_seconds = self._parse_expiry_to_seconds(expiry)
-            if expiry_seconds is None:
+            bullx_amount = parsed_data.get('order_amount', '')
+            if not bullx_amount:
                 return None
 
             # Get bracket entries for result
             bracket_config = BRACKET_CONFIG[coin.bracket]
             bracket_entries = bracket_config['entries']
 
-            # Try to match against unmatched database orders by expiry time
-            best_match = None
+            # Normalize amount for comparison
+            normalized_bullx = bullx_amount.strip().lower()
+
+            # Try to match against unmatched database orders by order_amount
             for db_order in active_db_orders:
                 # Skip if already matched
                 if db_order.id in matched_order_ids:
                     continue
 
-                # Check expiry time match
-                if db_order.expiry_time:
-                    time_diff = abs((db_order.expiry_time - datetime.now()).total_seconds() - expiry_seconds)
-                    if time_diff <= 300:  # 5 minute tolerance
-                        best_match = db_order
-                        break
+                # Check if order amounts match
+                if db_order.order_amount:
+                    normalized_db = db_order.order_amount.strip().lower()
+                    if normalized_bullx == normalized_db:
+                        logger.debug(f"     Order amount match: Row → Order {db_order.id} (bracket {db_order.bracket_id})")
+                        return {
+                            'status': 'success',
+                            'order': db_order,
+                            'bracket_id': db_order.bracket_id,
+                            'method': 'order_amount_match',
+                            'coin': coin,
+                            'bracket_entries': bracket_entries
+                        }
 
-            if best_match:
-                logger.debug(f"     Weak match (expiry): Row → Order {best_match.id} (bracket {best_match.bracket_id})")
+            return None
+
+        except Exception as e:
+            logger.error(f"     Error in order amount matching: {e}")
+            return None
+
+    def _try_deterministic_matching(
+        self,
+        active_db_orders: List,
+        matched_order_ids: set,
+        coin: Any
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Deterministic matching: If exactly 1 database order remains unmatched, match it.
+        This handles cases like market orders with "1 TP, 1 SL" that don't match by entry price.
+
+        Args:
+            active_db_orders: List of ACTIVE database orders for this coin
+            matched_order_ids: Set of database order IDs already matched
+            coin: Coin object
+
+        Returns:
+            Match result dict or None if not exactly 1 remaining
+        """
+        try:
+            # Find unmatched database orders
+            unmatched_orders = [
+                order for order in active_db_orders
+                if order.id not in matched_order_ids
+            ]
+
+            # If exactly 1 order remains, match it deterministically
+            if len(unmatched_orders) == 1:
+                db_order = unmatched_orders[0]
+
+                # Get bracket entries for result
+                bracket_config = BRACKET_CONFIG[coin.bracket]
+                bracket_entries = bracket_config['entries']
+
+                logger.debug(f"     Deterministic match: Row → Order {db_order.id} (bracket {db_order.bracket_id}) (only remaining order)")
                 return {
                     'status': 'success',
-                    'order': best_match,
-                    'bracket_id': best_match.bracket_id,
-                    'method': 'expiry_time_match',
+                    'order': db_order,
+                    'bracket_id': db_order.bracket_id,
+                    'method': 'deterministic_match',
                     'coin': coin,
                     'bracket_entries': bracket_entries
                 }
@@ -1149,7 +1193,7 @@ class EnhancedOrderProcessor:
             return None
 
         except Exception as e:
-            logger.error(f"     Error in weak matching: {e}")
+            logger.error(f"     Error in deterministic matching: {e}")
             return None
 
     async def _identify_all_orders_for_coin(
@@ -1214,8 +1258,8 @@ class EnhancedOrderProcessor:
 
             logger.info(f"     ✅ Phase 1 complete: {phase1_matches}/{len(coin_orders)} orders matched")
 
-            # PHASE 2: Weak matching (expiry time) for remaining orders
-            logger.info(f"     📍 PHASE 2: Weak matching (expiry time) for remaining orders...")
+            # PHASE 2: Order amount matching for remaining orders
+            logger.info(f"     📍 PHASE 2: Order amount matching for remaining orders...")
             phase2_matches = 0
             for order_info in coin_orders:
                 row_index = order_info['row_index']
@@ -1226,7 +1270,7 @@ class EnhancedOrderProcessor:
 
                 parsed_data = order_info['parsed_data']
 
-                match_result = self._try_weak_matching(
+                match_result = self._try_order_amount_matching(
                     parsed_data,
                     active_db_orders,
                     matched_order_ids,
@@ -1237,11 +1281,45 @@ class EnhancedOrderProcessor:
                     identification_results[row_index] = match_result
                     matched_order_ids.add(match_result['order'].id)
                     phase2_matches += 1
-                    logger.info(f"        ✅ Row {row_index} → Order {match_result['order'].id} (bracket {match_result['bracket_id']}) via expiry_time")
-                else:
-                    logger.warning(f"        ❌ Row {row_index}: No match found (might be orphaned)")
+                    logger.info(f"        ✅ Row {row_index} → Order {match_result['order'].id} (bracket {match_result['bracket_id']}) via order_amount")
 
             logger.info(f"     ✅ Phase 2 complete: {phase2_matches} additional orders matched")
+
+            # PHASE 3: Deterministic matching for remaining orders
+            # If exactly 1 BullX order and 1 DB order remain, match them
+            logger.info(f"     📍 PHASE 3: Deterministic matching for remaining orders...")
+            phase3_matches = 0
+
+            # Get remaining unmatched BullX orders
+            unmatched_bullx_orders = [
+                order_info for order_info in coin_orders
+                if order_info['row_index'] not in identification_results
+            ]
+
+            # If exactly 1 BullX order remains unmatched
+            if len(unmatched_bullx_orders) == 1:
+                order_info = unmatched_bullx_orders[0]
+                row_index = order_info['row_index']
+
+                match_result = self._try_deterministic_matching(
+                    active_db_orders,
+                    matched_order_ids,
+                    coin
+                )
+
+                if match_result:
+                    identification_results[row_index] = match_result
+                    matched_order_ids.add(match_result['order'].id)
+                    phase3_matches += 1
+                    logger.info(f"        ✅ Row {row_index} → Order {match_result['order'].id} (bracket {match_result['bracket_id']}) via deterministic")
+                else:
+                    logger.warning(f"        ❌ Row {row_index}: No match found (might be orphaned)")
+            elif len(unmatched_bullx_orders) > 1:
+                # Multiple unmatched - can't use deterministic matching
+                for order_info in unmatched_bullx_orders:
+                    logger.warning(f"        ❌ Row {order_info['row_index']}: No match found (might be orphaned)")
+
+            logger.info(f"     ✅ Phase 3 complete: {phase3_matches} additional orders matched")
             logger.info(f"     📊 Total: {len(identification_results)}/{len(coin_orders)} orders identified")
 
             # Check for unmatched database orders (missing from BullX)

@@ -237,18 +237,21 @@ class EnhancedOrderProcessor:
                 logger.warning(f"  ❌ Could not find coin for token: {token}")
                 return
 
-            # PRIORITY 0: Reconcile database with BullX (mark cancelled orders)
-            logger.info(f"  🔍 PRIORITY 0: Reconciling database with BullX...")
-            reconciled_count = await self._reconcile_database_with_bullx(coin, coin_orders, profile_name)
+            # PRIORITY 0: Two-phase order identification for ALL orders
+            # This prevents duplicate matches (same DB order matched multiple times)
+            # Must run FIRST so reconciliation can use the results
+            logger.info(f"  🔍 PRIORITY 0: Identifying all orders (two-phase approach)...")
+            identification_results = await self._identify_all_orders_for_coin(coin, coin_orders, profile_name)
+
+            # PRIORITY 0.5: Reconcile database with BullX (mark cancelled orders)
+            # Uses identification results to find truly missing orders
+            # This handles cases where orders were deleted from BullX but remain ACTIVE in DB
+            logger.info(f"  🔍 PRIORITY 0.5: Reconciling database with BullX...")
+            reconciled_count = self._reconcile_database_with_identification(coin, identification_results, profile_name)
             if reconciled_count > 0:
                 logger.warning(f"  ⚠️  Reconciled {reconciled_count} orders (marked as CANCELLED in database)")
             else:
                 logger.info(f"  ✅ Database already in sync with BullX")
-
-            # PRIORITY 0.5: Two-phase order identification for ALL orders
-            # This prevents duplicate matches (same DB order matched multiple times)
-            logger.info(f"  🔍 PRIORITY 0.5: Identifying all orders (two-phase approach)...")
-            identification_results = await self._identify_all_orders_for_coin(coin, coin_orders, profile_name)
 
             # PRIORITY 0.75: Check for orphaned orders (on BullX but not matched to database)
             # Uses identification results instead of re-matching
@@ -2864,6 +2867,76 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"     Error extracting bracket_id from BullX order: {e}")
             return None
+
+    def _reconcile_database_with_identification(
+        self,
+        coin: Any,
+        identification_results: Dict[int, Dict[str, Any]],
+        profile_name: str
+    ) -> int:
+        """
+        Reconcile database with BullX using two-phase identification results.
+        Marks database orders as CANCELLED if they weren't matched to any BullX order.
+
+        This correctly handles cases where trigger conditions have changed (e.g., "Buy below $X" → "1 SL")
+        because the two-phase identification still matches those orders.
+
+        Args:
+            coin: Coin object from database
+            identification_results: Dict mapping row_index to identification result
+            profile_name: Profile name
+
+        Returns:
+            Number of orders reconciled (marked as CANCELLED)
+        """
+        try:
+            # Get all ACTIVE database orders for this coin and profile
+            db_orders = db_manager.get_orders_by_coin(coin.id)
+            active_db_orders = [
+                order for order in db_orders
+                if order.status == "ACTIVE" and order.profile_name == profile_name
+            ]
+
+            if not active_db_orders:
+                logger.info(f"     No ACTIVE orders in database for this coin")
+                return 0
+
+            # Build set of database order IDs that were matched to BullX orders
+            matched_db_order_ids = set()
+            for match_result in identification_results.values():
+                if match_result and match_result.get('order'):
+                    matched_db_order_ids.add(match_result['order'].id)
+
+            logger.info(f"     BullX matched {len(matched_db_order_ids)} database orders")
+            logger.info(f"     Database has {len(active_db_orders)} ACTIVE orders")
+
+            # Find database orders that were NOT matched (missing from BullX)
+            reconciled_count = 0
+            for db_order in active_db_orders:
+                if db_order.id not in matched_db_order_ids:
+                    logger.warning(f"     🔄 RECONCILIATION: Order {db_order.id} (bracket_id {db_order.bracket_id}) exists in DB but NOT on BullX")
+                    logger.warning(f"        Trigger: {db_order.trigger_condition or 'None'}")
+                    logger.warning(f"        Marking as CANCELLED to allow replacement...")
+
+                    # Mark as CANCELLED in database
+                    success = db_manager.mark_order_for_replacement(db_order.id, "CANCELLED")
+
+                    if success:
+                        logger.info(f"        ✅ Order {db_order.id} marked as CANCELLED")
+                        reconciled_count += 1
+                    else:
+                        logger.error(f"        ❌ Failed to mark order {db_order.id} as CANCELLED")
+
+            if reconciled_count > 0:
+                logger.info(f"     ✅ Reconciled {reconciled_count} orders with BullX state")
+            else:
+                logger.info(f"     ✅ All database orders matched to BullX (no reconciliation needed)")
+
+            return reconciled_count
+
+        except Exception as e:
+            logger.error(f"      💥 Error reconciling database with identification results: {e}")
+            return 0
 
     async def _reconcile_database_with_bullx(self, coin: Any, coin_orders: List[Dict], profile_name: str) -> int:
         """

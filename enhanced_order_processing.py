@@ -3178,8 +3178,12 @@ class EnhancedOrderProcessor:
                     logger.error(f"    ❌ Could not parse row {row_index} for verification")
                     return False
 
-                # Get coin address from href (last part of URL)
-                row_coin_address = href.split('/')[-1] if '/' in href else href
+                # Extract coin address from href query parameter
+                # Href format: "terminal?chainId=1399811149&address=DNhQZ1CE9qZ2FNrVhsCXwQJ2vZG8ufZkcYakTS5Jpump"
+                if 'address=' in href:
+                    row_coin_address = href.split('address=')[-1].split('&')[0]
+                else:
+                    row_coin_address = href.split('/')[-1] if '/' in href else href
 
                 # Get trigger condition to verify bracket_id
                 trigger_condition = parsed_data.get('trigger_condition', '')

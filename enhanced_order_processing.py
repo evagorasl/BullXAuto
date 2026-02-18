@@ -2350,15 +2350,16 @@ class EnhancedOrderProcessor:
             logger.info(f"⏰ PROCESSING {len(self.individual_expired_orders)} INDIVIDUAL EXPIRED ORDERS")
             logger.info(f"{'='*80}")
             
-            # Sort expired orders by row_index (ascending) to process top-to-bottom
-            # This ensures we can accurately track and adjust for row shifts
-            expired_orders_sorted = sorted(self.individual_expired_orders, 
-                                          key=lambda x: x['order_info']['row_index'])
-            
-            # Track deletions to adjust row indices as rows shift up
-            deletions_made = 0
+            # Sort expired orders by (button_index, row_index) so we process each
+            # filter's orders in ascending row order, allowing accurate row shift tracking
+            expired_orders_sorted = sorted(self.individual_expired_orders,
+                                          key=lambda x: (x['order_info']['button_index'], x['order_info']['row_index']))
+
+            # Track deletions PER FILTER BUTTON to correctly adjust row indices
+            # Rows only shift on the filter they were deleted from
+            deletions_per_button: Dict[int, int] = {}
             orders_processed = 0
-            
+
             for expired_order_dict in expired_orders_sorted:
                 try:
                     order = expired_order_dict['order']
@@ -2366,13 +2367,14 @@ class EnhancedOrderProcessor:
                     coin = expired_order_dict['coin']
                     button_index = order_info['button_index']
                     original_row_index = order_info['row_index']
-                    
-                    # Adjust row index based on previous deletions (rows shift up)
-                    adjusted_row_index = original_row_index - deletions_made
+
+                    # Adjust row index based on deletions made on THIS filter button only
+                    deletions_made_for_button = deletions_per_button.get(button_index, 0)
+                    adjusted_row_index = original_row_index - deletions_made_for_button
                     
                     logger.info(f"\n📝 Processing expired order: ID {order.id} (Bracket {order.bracket_id})")
                     logger.info(f"   Coin: {coin.name or coin.address}")
-                    logger.info(f"   Original row: {original_row_index}, Adjusted row: {adjusted_row_index}, Deletions made: {deletions_made}")
+                    logger.info(f"   Original row: {original_row_index}, Adjusted row: {adjusted_row_index}, Deletions on filter {button_index}: {deletions_made_for_button}")
                     
                     # Step 1: Re-click filter button
                     filter_success = await self._click_coin_filter_button(profile_name, button_index)
@@ -2448,10 +2450,10 @@ class EnhancedOrderProcessor:
                     
                     self.orders_for_renewal.append(renewal_info)
                     
-                    # Increment deletions counter since this deletion was successful
-                    deletions_made += 1
+                    # Increment per-button deletion counter since this deletion was successful
+                    deletions_per_button[button_index] = deletions_made_for_button + 1
                     orders_processed += 1
-                    logger.info(f"   ✅ Order {order.id} marked for renewal (total deletions: {deletions_made})")
+                    logger.info(f"   ✅ Order {order.id} marked for renewal (deletions on filter {button_index}: {deletions_per_button[button_index]})")
                     
                 except Exception as e:
                     logger.error(f"   💥 Error processing individual expired order: {e}")

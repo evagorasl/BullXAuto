@@ -94,7 +94,6 @@ class BullXAutomator:
             # Not logged in, perform login
             driver = self.driver_manager.get_driver(profile_name)
             driver.get(self.base_url)
-            print(1)
             # Wait for page to load
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))

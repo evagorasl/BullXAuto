@@ -2956,10 +2956,11 @@ class EnhancedOrderProcessor:
     ) -> int:
         """
         Reconcile database with BullX using two-phase identification results.
-        Marks database orders as CANCELLED if they weren't matched to any BullX order.
 
-        This correctly handles cases where trigger conditions have changed (e.g., "Buy below $X" → "1 SL")
-        because the two-phase identification still matches those orders.
+        MORE CONSERVATIVE APPROACH:
+        - Only marks orders as CANCELLED if database has MORE orders than BullX
+        - This prevents false positives when matching logic fails
+        - Logs warnings for uncertain cases requiring manual review
 
         Args:
             coin: Coin object from database
@@ -2987,30 +2988,60 @@ class EnhancedOrderProcessor:
                 if match_result and match_result.get('order'):
                     matched_db_order_ids.add(match_result['order'].id)
 
-            logger.info(f"     BullX matched {len(matched_db_order_ids)} database orders")
-            logger.info(f"     Database has {len(active_db_orders)} ACTIVE orders")
+            # Count BullX orders (non-None identification results)
+            bullx_order_count = sum(1 for result in identification_results.values() if result)
+            db_active_count = len(active_db_orders)
+            matched_count = len(matched_db_order_ids)
 
-            # Find database orders that were NOT matched (missing from BullX)
+            logger.info(f"     📊 BullX has {bullx_order_count} orders, DB has {db_active_count} ACTIVE orders")
+            logger.info(f"     📊 Successfully matched {matched_count} orders")
+
+            # Find unmatched database orders
+            unmatched_orders = [
+                order for order in active_db_orders
+                if order.id not in matched_db_order_ids
+            ]
+
+            if not unmatched_orders:
+                logger.info(f"     ✅ All database orders matched to BullX (no reconciliation needed)")
+                return 0
+
+            logger.warning(f"     ⚠️  Found {len(unmatched_orders)} unmatched database orders")
+
+            # CONSERVATIVE CHECK: Only reconcile if DB has more ACTIVE orders than BullX has orders
+            # This prevents marking orders as CANCELLED when matching just failed
+            if db_active_count <= bullx_order_count:
+                logger.warning(f"     ⚠️  Database has {db_active_count} ACTIVE orders, BullX has {bullx_order_count} orders")
+                logger.warning(f"     ⚠️  NOT marking orders as CANCELLED - matching may have failed")
+                logger.warning(f"     ⚠️  Unmatched orders (may need manual review):")
+                for order in unmatched_orders:
+                    logger.warning(f"        - Order {order.id}: bracket_id={order.bracket_id}, entry=${order.entry_price:,.0f}")
+                    logger.warning(f"          Trigger: {order.trigger_condition or 'None'}")
+                    logger.warning(f"          Amount: {order.order_amount or 'None'}")
+                return 0
+
+            # DB has MORE orders than BullX - some orders are definitely missing from BullX
+            # Mark unmatched orders as CANCELLED
             reconciled_count = 0
-            for db_order in active_db_orders:
-                if db_order.id not in matched_db_order_ids:
-                    logger.warning(f"     🔄 RECONCILIATION: Order {db_order.id} (bracket_id {db_order.bracket_id}) exists in DB but NOT on BullX")
-                    logger.warning(f"        Trigger: {db_order.trigger_condition or 'None'}")
-                    logger.warning(f"        Marking as CANCELLED to allow replacement...")
+            logger.warning(f"     🔄 RECONCILIATION: DB has {db_active_count} orders but BullX only has {bullx_order_count}")
+            logger.warning(f"     🔄 Marking {len(unmatched_orders)} unmatched orders as CANCELLED...")
 
-                    # Mark as CANCELLED in database
-                    success = db_manager.mark_order_for_replacement(db_order.id, "CANCELLED")
+            for db_order in unmatched_orders:
+                logger.warning(f"        Order {db_order.id} (bracket_id {db_order.bracket_id}) - NOT on BullX")
+                logger.warning(f"           Trigger: {db_order.trigger_condition or 'None'}")
+                logger.warning(f"           Entry: ${db_order.entry_price:,.0f}")
 
-                    if success:
-                        logger.info(f"        ✅ Order {db_order.id} marked as CANCELLED")
-                        reconciled_count += 1
-                    else:
-                        logger.error(f"        ❌ Failed to mark order {db_order.id} as CANCELLED")
+                # Mark as CANCELLED in database
+                success = db_manager.mark_order_for_replacement(db_order.id, "CANCELLED")
+
+                if success:
+                    logger.info(f"           ✅ Marked as CANCELLED")
+                    reconciled_count += 1
+                else:
+                    logger.error(f"           ❌ Failed to mark as CANCELLED")
 
             if reconciled_count > 0:
                 logger.info(f"     ✅ Reconciled {reconciled_count} orders with BullX state")
-            else:
-                logger.info(f"     ✅ All database orders matched to BullX (no reconciliation needed)")
 
             return reconciled_count
 

@@ -1088,6 +1088,74 @@ class EnhancedOrderProcessor:
             logger.error(f"     Error in strong matching: {e}")
             return None
 
+    async def _reidentify_order_row_index(self, profile_name: str, button_index: int, order: Order, coin: Any) -> Optional[int]:
+        """
+        Re-identify an order's current row index by re-scraping and re-matching.
+        This prevents stale row index issues when BullX orders change between identification and deletion.
+
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index
+            order: Order object to re-identify
+            coin: Coin object
+
+        Returns:
+            Fresh row index (1-based) if found, None if order not found
+        """
+        try:
+            logger.debug(f"      Re-identifying order {order.id} (bracket_id={order.bracket_id})...")
+
+            # Get current orders from BullX for this filter button
+            result = self.automator.check_orders(profile_name)
+            if not result["success"]:
+                logger.error(f"      Failed to scrape orders for re-identification")
+                return None
+
+            # Find the button_info for our filter button
+            button_orders = None
+            for button_info in result["order_info"]:
+                if button_info.get("button_index") == button_index:
+                    button_orders = button_info.get("rows", [])
+                    break
+
+            if not button_orders:
+                logger.error(f"      No orders found for button {button_index}")
+                return None
+
+            logger.debug(f"      Found {len(button_orders)} current orders on button {button_index}")
+
+            # Parse and prepare coin_orders for identification
+            coin_orders = []
+            for row_index, row in enumerate(button_orders):
+                parsed_data = self._parse_row_data(row)
+                if parsed_data:
+                    coin_orders.append({
+                        'parsed_data': parsed_data,
+                        'button_index': button_index,
+                        'row_index': row_index + 1  # 1-based
+                    })
+
+            if not coin_orders:
+                logger.error(f"      No parseable orders found")
+                return None
+
+            # Use two-phase identification to find our order
+            identification_results = await self._identify_all_orders_for_coin(coin, coin_orders, profile_name)
+
+            # Search for our order in the identification results
+            for row_index, match_result in identification_results.items():
+                if match_result and match_result.get('order'):
+                    if match_result['order'].id == order.id:
+                        logger.debug(f"      ✅ Found order {order.id} at row {row_index}")
+                        return row_index
+
+            logger.warning(f"      Order {order.id} not found in current BullX orders")
+            return None
+
+        except Exception as e:
+            logger.error(f"      Error re-identifying order: {e}")
+            return None
+
     def _try_order_amount_matching(
         self,
         parsed_data: Dict[str, Any],
@@ -2375,23 +2443,36 @@ class EnhancedOrderProcessor:
                     logger.info(f"\n📝 Processing expired order: ID {order.id} (Bracket {order.bracket_id})")
                     logger.info(f"   Coin: {coin.name or coin.address}")
                     logger.info(f"   Original row: {original_row_index}, Adjusted row: {adjusted_row_index}, Deletions on filter {button_index}: {deletions_made_for_button}")
-                    
-                    # Step 1: Re-click filter button
+
+                    # Step 1: Click filter button to ensure correct coin is displayed
+                    logger.info(f"   🔄 Selecting filter {button_index}...")
                     filter_success = await self._click_coin_filter_button(profile_name, button_index)
                     if not filter_success:
-                        logger.error(f"   ❌ Failed to click filter button - skipping")
+                        logger.error(f"   ❌ Failed to select filter button - skipping")
                         # Don't increment deletions_made since deletion didn't happen
                         continue
-                    
-                    # Step 2: Get row count BEFORE deletion for verification
+
+                    # Step 2: RE-IDENTIFY ORDER to get fresh row index
+                    # This prevents stale row index issues when BullX orders change between identification and deletion
+                    logger.info(f"   🔍 Re-identifying order to get current row index...")
+                    fresh_row_index = await self._reidentify_order_row_index(profile_name, button_index, order, coin)
+
+                    if fresh_row_index is None:
+                        logger.error(f"   ❌ Could not find order on BullX - may have been deleted or filled")
+                        logger.error(f"   ⚠️  Skipping deletion to prevent deleting wrong order")
+                        continue
+
+                    logger.info(f"   ✅ Order re-identified at row {fresh_row_index} (was adjusted to {adjusted_row_index})")
+
+                    # Step 3: Get row count BEFORE deletion for verification
                     logger.info(f"   📊 Getting row count before deletion...")
                     rows_before = await self._get_button_row_count(profile_name, button_index)
                     logger.info(f"   📊 Rows before deletion: {rows_before}")
 
-                    # Step 3: Delete from BullX using adjusted row index (with verification)
+                    # Step 4: Delete from BullX using FRESH row index (with verification)
                     logger.info(f"   🗑️  Deleting expired order from BullX...")
                     deletion_success = await self._delete_bullx_entry(
-                        profile_name, button_index, adjusted_row_index,
+                        profile_name, button_index, fresh_row_index,
                         expected_coin_address=coin.address,
                         expected_bracket_id=order.bracket_id
                     )
@@ -2404,7 +2485,7 @@ class EnhancedOrderProcessor:
                     # Wait for deletion to process
                     time.sleep(3)
 
-                    # Step 4: VERIFY deletion worked by checking row count
+                    # Step 5: VERIFY deletion worked by checking row count
                     logger.info(f"   🔍 Verifying deletion...")
                     rows_after = await self._get_button_row_count(profile_name, button_index)
                     logger.info(f"   📊 Rows after deletion: {rows_after}")
@@ -2419,7 +2500,7 @@ class EnhancedOrderProcessor:
 
                     logger.info(f"   ✅ Deletion verified: {rows_before} → {rows_after} rows")
 
-                    # Step 5: CRITICAL - Mark as EXPIRED IMMEDIATELY after verified BullX deletion
+                    # Step 6: CRITICAL - Mark as EXPIRED IMMEDIATELY after verified BullX deletion
                     # This ensures if crash happens, at least old order is marked properly
                     # Using atomic transaction to prevent partial updates
                     logger.info(f"   📝 Marking order {order.id} as EXPIRED immediately...")
@@ -2434,7 +2515,7 @@ class EnhancedOrderProcessor:
 
                     logger.info(f"   ✅ Order {order.id} marked as EXPIRED")
 
-                    # Step 6: Mark for renewal
+                    # Step 7: Mark for renewal
                     renewal_info = {
                         'order_id': order.id,
                         'coin_address': coin.address,

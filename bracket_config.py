@@ -168,9 +168,12 @@ def validate_bracket_config():
     
     return errors
 
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+
 # Validate configuration on import
 _validation_errors = validate_bracket_config()
 if _validation_errors:
-    print("Bracket configuration validation errors:")
+    _logger.warning("Bracket configuration validation errors:")
     for error in _validation_errors:
-        print(f"  - {error}")
+        _logger.warning(f"  - {error}")

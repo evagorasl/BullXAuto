@@ -205,7 +205,7 @@ class BracketOrderPlacer:
                     time.sleep(1)
             except Exception as e:
                 logger.error(f"      ❌ Failed to click Buy button: {e}")
-                return False
+                return {"success": False, "error": f"Failed to click Buy button: {e}"}
             # COMMENTED OUT: Wallet selection (no longer used for identification)
             # if not self._select_wallets_for_bracket_sub_id(driver, bracket_id):
             #     return {"success": False, "error": f"Failed to select wallets for bracket sub ID {bracket_id}"}

@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 # Import our modules AFTER logging configuration
 from database import create_tables, init_profiles, db_manager
 from chrome_driver import chrome_driver_manager
-from background_task_monitor import enhanced_order_monitor
+from background_task_monitor import enhanced_order_monitor, queue_processor
+from config import config
 from routers import secure_router, public_router
 from middleware import CloseDriverMiddleware
 from auto_monitoring_middleware import AutoMonitoringMiddleware
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     logger.info("Starting BullX Automation API...")
+    config.APP_START_TIME = datetime.now()
     
     # Initialize database
     create_tables()
@@ -47,7 +49,10 @@ async def lifespan(app: FastAPI):
     
     # Start background monitoring for active profiles
     await start_monitoring_for_active_profiles()
-    
+
+    # Start queue processor
+    await queue_processor.start()
+
     logger.info("BullX Automation API started successfully")
     
     yield
@@ -57,7 +62,10 @@ async def lifespan(app: FastAPI):
     
     # Stop all background tasks
     await enhanced_order_monitor.stop_monitoring()
-    
+
+    # Stop queue processor
+    await queue_processor.stop()
+
     # Close all Chrome drivers
     chrome_driver_manager.close_all_drivers()
     
@@ -109,10 +117,10 @@ app.add_middleware(AutoMonitoringMiddleware)
 app.add_middleware(CloseDriverMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Include routers
@@ -123,17 +131,12 @@ app.include_router(secure_router)
 frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
 if os.path.exists(frontend_dir):
     app.mount("/dashboard", StaticFiles(directory=frontend_dir, html=True), name="frontend")
-    
-    @app.get("/", include_in_schema=False)
-    async def redirect_to_dashboard():
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/dashboard")
 
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
+        host=config.API_HOST,
+        port=config.API_PORT,
+        reload=config.API_RELOAD,
+        log_level=config.LOG_LEVEL.lower()
     )

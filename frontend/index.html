@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BullX Automation Dashboard</title>
-    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="css/styles.css?v=4">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
 </head>
 <body>
@@ -95,6 +95,9 @@
                         <button id="execute-bracket-btn" class="btn btn-primary">
                             <i class="fas fa-rocket"></i> Execute Bracket Strategy
                         </button>
+                        <button id="queue-bracket-btn" class="btn btn-warning">
+                            <i class="fas fa-list-ol"></i> Add to Queue
+                        </button>
                     </div>
 
                     <div id="bracket-preview" class="result-box hidden">
@@ -124,6 +127,126 @@
                     <div id="bracket-result" class="result-box hidden">
                         <h3>Bracket Strategy Result</h3>
                         <div id="bracket-result-details"></div>
+                    </div>
+                </div>
+
+                <!-- Execution Queue Section -->
+                <div class="card full-width">
+                    <h2><i class="fas fa-list-ol"></i> Execution Queue</h2>
+                    <div class="queue-controls">
+                        <button id="refresh-queue-btn" class="btn btn-secondary">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <button id="clear-completed-queue-btn" class="btn btn-warning">
+                            <i class="fas fa-broom"></i> Clear Completed
+                        </button>
+                        <span id="queue-auto-refresh-indicator" class="queue-indicator">
+                            <i class="fas fa-circle"></i> Auto-refresh: <span id="queue-refresh-status">OFF</span>
+                        </span>
+                    </div>
+
+                    <div id="queue-message" class="message hidden"></div>
+
+                    <div class="table-container">
+                        <table id="queue-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Address</th>
+                                    <th>Amount (SOL)</th>
+                                    <th>Bracket</th>
+                                    <th>Priority</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Started</th>
+                                    <th>Completed</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="queue-body">
+                                <!-- Queue items will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <div id="no-queue-message" class="message">No items in the queue.</div>
+                </div>
+
+                <!-- System Monitoring Section -->
+                <div class="card full-width">
+                    <h2><i class="fas fa-heartbeat"></i> System Monitoring</h2>
+                    <div class="monitoring-controls">
+                        <button id="refresh-monitoring-btn" class="btn btn-secondary">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <span id="monitoring-auto-refresh-indicator" class="queue-indicator">
+                            <i class="fas fa-circle"></i> Auto-refresh: <span id="monitoring-refresh-status">OFF</span>
+                        </span>
+                    </div>
+
+                    <div id="monitoring-message" class="message hidden"></div>
+
+                    <!-- Top Row: Status Cards -->
+                    <div class="monitoring-status-row">
+                        <!-- System Status Card -->
+                        <div class="monitoring-status-card">
+                            <h3><i class="fas fa-server"></i> System</h3>
+                            <div id="monitoring-system-info">
+                                <div class="monitoring-stat">
+                                    <span class="monitoring-label">Uptime:</span>
+                                    <span id="monitoring-uptime" class="monitoring-value">--</span>
+                                </div>
+                                <div class="monitoring-stat">
+                                    <span class="monitoring-label">Environment:</span>
+                                    <span id="monitoring-environment" class="monitoring-value">--</span>
+                                </div>
+                                <div class="monitoring-stat">
+                                    <span class="monitoring-label">Log File:</span>
+                                    <span id="monitoring-log-file" class="monitoring-value">--</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Order Monitor Card -->
+                        <div class="monitoring-status-card">
+                            <h3><i class="fas fa-binoculars"></i> Order Monitor</h3>
+                            <div id="monitoring-order-monitor">
+                                <p class="monitoring-placeholder">Loading...</p>
+                            </div>
+                        </div>
+
+                        <!-- Queue Processor Card -->
+                        <div class="monitoring-status-card">
+                            <h3><i class="fas fa-cogs"></i> Queue Processor</h3>
+                            <div id="monitoring-queue-processor">
+                                <p class="monitoring-placeholder">Loading...</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Middle: Recent Activity Timeline -->
+                    <div class="monitoring-section">
+                        <h3><i class="fas fa-stream"></i> Recent Activity</h3>
+                        <div id="monitoring-activity-timeline" class="monitoring-timeline">
+                            <p class="monitoring-placeholder">Loading...</p>
+                        </div>
+                    </div>
+
+                    <!-- Bottom: Recent Logs Panel -->
+                    <div class="monitoring-section">
+                        <h3><i class="fas fa-file-alt"></i> Recent Logs</h3>
+                        <div class="monitoring-log-controls">
+                            <select id="monitoring-log-level-filter">
+                                <option value="warning">Warnings + Errors</option>
+                                <option value="error">Errors Only</option>
+                                <option value="all">All Levels</option>
+                            </select>
+                            <button id="clear-logs-btn" class="btn btn-danger btn-small">
+                                <i class="fas fa-trash"></i> Clear Logs
+                            </button>
+                        </div>
+                        <div id="monitoring-logs-panel" class="monitoring-logs-panel">
+                            <p class="monitoring-placeholder">Loading...</p>
+                        </div>
                     </div>
                 </div>
 
@@ -263,7 +386,7 @@
         </div>
     </div>
 
-    <script src="js/api.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/api.js?v=3"></script>
+    <script src="js/app.js?v=3"></script>
 </body>
 </html>

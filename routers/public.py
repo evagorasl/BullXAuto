@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from fastapi.responses import RedirectResponse
 import logging
 
 # Configure logging
@@ -10,10 +11,10 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
-@router.get("/")
+@router.get("/", include_in_schema=False)
 async def root():
-    """Root endpoint"""
-    return {"message": "BullX Automation API is running"}
+    """Redirect root to dashboard"""
+    return RedirectResponse(url="/dashboard")
 
 @router.get("/health")
 async def health_check():

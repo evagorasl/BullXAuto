@@ -1,23 +1,28 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Optional
 import logging
+import os
+import re
+from datetime import datetime, date
 
 # Import our modules
 from models import (
-    LoginRequest, SearchRequest, StrategyRequest, 
-    OrderResponse, ProfileResponse, Profile, 
+    LoginRequest, SearchRequest, StrategyRequest,
+    OrderResponse, ProfileResponse, Profile,
     CoinResponse, OrderDetailResponse, MultiOrderRequest,
-    MultiOrderResponse, SubOrderRequest, BracketInfo
+    MultiOrderResponse, SubOrderRequest, BracketInfo,
+    QueueBracketStrategyRequest, QueuedExecutionResponse
 )
 from database import db_manager
 from chrome_driver import bullx_automator, chrome_driver_manager
 from auth import get_current_profile
 from bracket_config import get_bracket_info as get_bracket_config_info, calculate_order_parameters, BRACKET_CONFIG
 from bracket_order_placement import bracket_order_manager
+from config import config
 from background_task_monitor import (
     get_background_task_health, get_task_execution_history,
     start_background_tasks_for_profile, stop_background_tasks_for_profile,
-    enhanced_order_monitor
+    enhanced_order_monitor, queue_processor
 )
 
 # Configure logging
@@ -984,6 +989,167 @@ async def get_missed_tasks(
         logger.error(f"Error getting missed tasks: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============================================================
+# Queue Bracket Strategy Endpoints
+# ============================================================
+
+@router.post("/queue/bracket-strategy")
+async def queue_bracket_strategy(
+    request: QueueBracketStrategyRequest,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Add a bracket strategy execution to the queue"""
+    try:
+        logger.info(f"Queue bracket strategy request: {request.address} "
+                    f"amount={request.total_amount} profile={current_profile.name}")
+
+        if request.total_amount <= 0:
+            raise HTTPException(status_code=400, detail="Total amount must be greater than 0")
+
+        if request.bracket is not None and request.bracket not in [1, 2, 3, 4, 5]:
+            raise HTTPException(status_code=400, detail="Bracket must be between 1 and 5")
+
+        queued_item = db_manager.add_to_queue(
+            profile_name=current_profile.name,
+            address=request.address,
+            total_amount=request.total_amount,
+            bracket=request.bracket,
+            priority=request.priority or 0
+        )
+
+        return {
+            "success": True,
+            "message": f"Bracket strategy queued for {request.address}",
+            "queue_item": QueuedExecutionResponse.from_orm(queued_item),
+            "profile": current_profile.name
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Queue bracket strategy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/queue")
+async def get_queue(
+    status: Optional[str] = Query(None, description="Filter by status: QUEUED, IN_PROGRESS, COMPLETED, FAILED"),
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Get queue items for the current profile"""
+    try:
+        valid_statuses = ["QUEUED", "IN_PROGRESS", "COMPLETED", "FAILED"]
+        if status and status.upper() not in valid_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            )
+
+        items = db_manager.get_queue_items(
+            profile_name=current_profile.name,
+            status=status.upper() if status else None
+        )
+
+        return {
+            "success": True,
+            "items": [QueuedExecutionResponse.from_orm(item) for item in items],
+            "total": len(items),
+            "queue_processor_status": queue_processor.get_queue_status()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get queue error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/queue/{item_id}")
+async def cancel_queue_item(
+    item_id: int,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Cancel/remove a queued item (only if status is QUEUED)"""
+    try:
+        item = db_manager.get_queue_item(item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Queue item {item_id} not found")
+        if item.profile_name != current_profile.name:
+            raise HTTPException(status_code=403, detail="Cannot cancel items from another profile")
+        if item.status != "QUEUED":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Can only cancel QUEUED items. Current status: {item.status}"
+            )
+
+        success = db_manager.cancel_queue_item(item_id)
+        if success:
+            return {
+                "success": True,
+                "message": f"Queue item {item_id} cancelled"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to cancel queue item")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Cancel queue item error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/queue/{item_id}/retry")
+async def retry_queue_item(
+    item_id: int,
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Retry a failed queue item"""
+    try:
+        item = db_manager.get_queue_item(item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Queue item {item_id} not found")
+        if item.profile_name != current_profile.name:
+            raise HTTPException(status_code=403, detail="Cannot retry items from another profile")
+        if item.status != "FAILED":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Can only retry FAILED items. Current status: {item.status}"
+            )
+
+        retried_item = db_manager.retry_queue_item(item_id)
+        if retried_item:
+            return {
+                "success": True,
+                "message": f"Queue item {item_id} re-queued for retry",
+                "queue_item": QueuedExecutionResponse.from_orm(retried_item)
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to retry queue item")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Retry queue item error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/queue")
+async def clear_completed_queue(
+    current_profile: Profile = Depends(get_current_profile)
+):
+    """Clear completed and failed items from the queue"""
+    try:
+        count = db_manager.clear_completed_queue_items(profile_name=current_profile.name)
+        return {
+            "success": True,
+            "message": f"Cleared {count} completed/failed items from queue",
+            "items_cleared": count
+        }
+    except Exception as e:
+        logger.error(f"Clear queue error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Clear database endpoints
 @router.delete("/coins/{address}")
 async def clear_coin_data(
@@ -1039,4 +1205,261 @@ async def clear_all_data(
         
     except Exception as e:
         logger.error(f"Clear all data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# System Monitoring Endpoints
+# ============================================================
+
+def _read_recent_logs(log_file: str, lines: int = 50, level: str = "all") -> list:
+    """Read and parse recent log lines from a log file.
+
+    Args:
+        log_file: Path to the log file (e.g., "logs/2026-03-06.log")
+        lines: Maximum number of entries to return
+        level: Filter level - "all", "error", or "warning" (includes WARNING + ERROR)
+
+    Returns:
+        List of parsed log entry dicts, oldest first
+    """
+    if not os.path.exists(log_file):
+        return []
+
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+
+        # Parse log format: DD/MM/YYYY-HH:MM:SS - logger_name - LEVEL - message
+        log_pattern = re.compile(
+            r"^(\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2})\s+-\s+(\S+)\s+-\s+"
+            r"(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+-\s+(.*)$"
+        )
+
+        level_filter = level.lower()
+        allowed_levels: set = set()
+        if level_filter == "error":
+            allowed_levels = {"ERROR", "CRITICAL"}
+        elif level_filter == "warning":
+            allowed_levels = {"WARNING", "ERROR", "CRITICAL"}
+
+        entries: list = []
+        for raw_line in reversed(all_lines):
+            raw_line = raw_line.rstrip()
+            if not raw_line:
+                continue
+
+            match = log_pattern.match(raw_line)
+            if not match:
+                continue
+
+            time_str, logger_name, log_level, message = match.groups()
+
+            if allowed_levels and log_level not in allowed_levels:
+                continue
+
+            entries.append({
+                "time": time_str,
+                "logger": logger_name,
+                "level": log_level,
+                "message": message,
+            })
+
+            if len(entries) >= lines:
+                break
+
+        entries.reverse()
+        return entries
+
+    except Exception as e:
+        logger.error(f"Error reading log file {log_file}: {e}")
+        return []
+
+
+@router.get("/monitoring/status")
+async def get_monitoring_status(
+    current_profile: Profile = Depends(get_current_profile),
+):
+    """Get unified system monitoring status"""
+    try:
+        now = datetime.now()
+
+        # 1. System info
+        uptime_seconds = (
+            (now - config.APP_START_TIME).total_seconds()
+            if config.APP_START_TIME
+            else 0
+        )
+        environment = os.getenv("ENVIRONMENT", "development")
+        today_str = now.strftime("%Y-%m-%d")
+        log_file = f"logs/{today_str}.log"
+
+        system_info = {
+            "uptime_seconds": round(uptime_seconds),
+            "environment": environment,
+            "log_file": log_file,
+        }
+
+        # 2. Order monitor status (reuse existing health status)
+        health_status = enhanced_order_monitor.get_task_health_status()
+
+        # Enrich each profile with active_orders count
+        for profile_name in list(health_status.get("profiles", {}).keys()):
+            active_orders = db_manager.get_active_orders_by_profile(profile_name)
+            health_status["profiles"][profile_name]["active_orders"] = len(
+                active_orders
+            )
+
+        order_monitor_data = {
+            "scheduler_running": health_status.get("scheduler_running", False),
+            "profiles": health_status.get("profiles", {}),
+        }
+
+        # 3. Queue processor status (reuse existing)
+        queue_status = queue_processor.get_queue_status()
+
+        # Enrich with today's counts
+        queued_items = db_manager.get_queue_items(status="QUEUED")
+        in_progress_items = db_manager.get_queue_items(status="IN_PROGRESS")
+        all_completed = db_manager.get_queue_items(status="COMPLETED")
+        all_failed = db_manager.get_queue_items(status="FAILED")
+
+        today_start = datetime.combine(date.today(), datetime.min.time())
+        completed_today = [
+            i
+            for i in all_completed
+            if i.completed_at and i.completed_at >= today_start
+        ]
+        failed_today = [
+            i for i in all_failed if i.completed_at and i.completed_at >= today_start
+        ]
+
+        queue_data = {
+            **queue_status,
+            "queued_items": len(queued_items),
+            "in_progress_items": len(in_progress_items),
+            "completed_items_today": len(completed_today),
+            "failed_items_today": len(failed_today),
+        }
+
+        # 4. Recent activity (merge task history + queue completions)
+        recent_activity: list = []
+
+        # Task execution history for all monitored profiles
+        for pname in enhanced_order_monitor.monitored_profiles:
+            history = enhanced_order_monitor.get_task_execution_history(pname, limit=5)
+            for task in history:
+                recent_activity.append(
+                    {
+                        "time": task.get("completion_time")
+                        or task.get("scheduled_time"),
+                        "type": "order_check",
+                        "profile": pname,
+                        "success": task.get("success", False),
+                        "orders_processed": task.get("orders_processed", 0),
+                        "error": task.get("error_message"),
+                    }
+                )
+
+        # Recent queue completions (all profiles)
+        all_queue_items = db_manager.get_queue_items()
+        recent_queue = sorted(
+            [i for i in all_queue_items if i.completed_at],
+            key=lambda x: x.completed_at,
+            reverse=True,
+        )[:5]
+
+        for item in recent_queue:
+            recent_activity.append(
+                {
+                    "time": item.completed_at.isoformat()
+                    if item.completed_at
+                    else None,
+                    "type": "queue_execution",
+                    "profile": item.profile_name,
+                    "address": item.address,
+                    "status": item.status,
+                    "error": item.error_message,
+                }
+            )
+
+        # Sort by time descending, take top 10
+        recent_activity.sort(key=lambda x: x.get("time") or "", reverse=True)
+        recent_activity = recent_activity[:10]
+
+        # 5. Recent logs (WARNING + ERROR by default)
+        recent_logs = _read_recent_logs(log_file, lines=20, level="warning")
+
+        return {
+            "success": True,
+            "timestamp": now.isoformat(),
+            "system": system_info,
+            "order_monitor": order_monitor_data,
+            "queue_processor": queue_data,
+            "recent_activity": recent_activity,
+            "recent_logs": recent_logs,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting monitoring status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/monitoring/logs")
+async def get_monitoring_logs(
+    lines: int = Query(50, description="Number of log lines to return", ge=1, le=500),
+    level: str = Query(
+        "all", description="Filter by level: all, error, warning"
+    ),
+    current_profile: Profile = Depends(get_current_profile),
+):
+    """Get recent log entries from today's log file"""
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        log_file = f"logs/{today_str}.log"
+
+        log_entries = _read_recent_logs(log_file, lines=lines, level=level)
+
+        return {
+            "success": True,
+            "log_file": log_file,
+            "total_entries": len(log_entries),
+            "level_filter": level,
+            "entries": log_entries,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting monitoring logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/monitoring/logs")
+async def clear_monitoring_logs(
+    current_profile: Profile = Depends(get_current_profile),
+):
+    """Clear today's log file"""
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        log_file = f"logs/{today_str}.log"
+
+        lines_cleared = 0
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8") as f:
+                lines_cleared = sum(1 for _ in f)
+
+            # Truncate the file
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write("")
+
+            logger.info(f"Log file cleared by {current_profile.name}: {log_file} ({lines_cleared} lines)")
+
+        return {
+            "success": True,
+            "log_file": log_file,
+            "lines_cleared": lines_cleared,
+            "message": f"Cleared {lines_cleared} lines from {log_file}",
+        }
+
+    except Exception as e:
+        logger.error(f"Error clearing logs: {e}")
         raise HTTPException(status_code=500, detail=str(e))

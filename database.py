@@ -1,16 +1,20 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from models import Base, Order, Profile, Coin
+from models import Base, Order, Profile, Coin, QueuedExecution
 from bracket_config import (
     calculate_bracket, get_bracket_info, calculate_order_parameters,
     BRACKET_CONFIG, BRACKET_RANGES, TRADE_SIZES, TAKE_PROFIT_PERCENTAGES
 )
+from config import config
 from typing import List, Optional, Dict, Any
 import os
+import logging
 from datetime import datetime
 
-# Database configuration
-DATABASE_URL = "sqlite:///./bullx_auto.db"
+logger = logging.getLogger(__name__)
+
+# Database configuration - use config for absolute path
+DATABASE_URL = config.DATABASE_URL
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -29,6 +33,7 @@ def get_db():
 def init_profiles():
     """Initialize default profiles with API keys"""
     import secrets
+    from pathlib import Path
     db = SessionLocal()
     try:
         # Check if profiles already exist
@@ -37,28 +42,38 @@ def init_profiles():
             # Generate secure API keys
             api_key_1 = f"bullx_{secrets.token_urlsafe(32)}"
             api_key_2 = f"bullx_{secrets.token_urlsafe(32)}"
-            
-            # Create default profiles
+
+            # Create default profiles using platform-aware paths from config
             profile1 = Profile(
                 name="Saruman",
-                chrome_profile_path=os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Saruman"),
+                chrome_profile_path=config.CHROME_PROFILES.get("Saruman", ""),
                 api_key=api_key_1
             )
             profile2 = Profile(
-                name="Gandalf", 
-                chrome_profile_path=os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Gandalf"),
+                name="Gandalf",
+                chrome_profile_path=config.CHROME_PROFILES.get("Gandalf", ""),
                 api_key=api_key_2
             )
-            
+
             db.add(profile1)
             db.add(profile2)
             db.commit()
-            print("Default profiles created with API keys:")
-            print(f"  Saruman: {api_key_1}")
-            print(f"  Gandalf: {api_key_2}")
-            print("IMPORTANT: Save these API keys securely!")
+
+            # Save API keys to file for safekeeping
+            keys_file = Path(__file__).parent / "api_keys.txt"
+            with open(keys_file, "w") as f:
+                f.write("BullX Automation API Keys\n")
+                f.write("=" * 40 + "\n")
+                f.write(f"Saruman: {api_key_1}\n")
+                f.write(f"Gandalf: {api_key_2}\n")
+                f.write("=" * 40 + "\n")
+                f.write("IMPORTANT: Keep this file secure!\n")
+
+            logger.warning("Default profiles created. API keys saved to api_keys.txt")
+            logger.warning(f"  Saruman: {api_key_1}")
+            logger.warning(f"  Gandalf: {api_key_2}")
     except Exception as e:
-        print(f"Error initializing profiles: {e}")
+        logger.error(f"Error initializing profiles: {e}")
         db.rollback()
     finally:
         db.close()
@@ -694,6 +709,169 @@ class DatabaseManager:
                 "coins_cleared": coins_cleared
             }
             
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+
+    # ---- Queue management methods ----
+
+    def add_to_queue(self, profile_name: str, address: str, total_amount: float,
+                     bracket: Optional[int] = None, priority: int = 0) -> QueuedExecution:
+        """Add a bracket strategy execution to the queue"""
+        db = self.SessionLocal()
+        try:
+            queued = QueuedExecution(
+                profile_name=profile_name,
+                address=address,
+                total_amount=total_amount,
+                bracket=bracket,
+                priority=priority,
+                status="QUEUED"
+            )
+            db.add(queued)
+            db.commit()
+            db.refresh(queued)
+            return queued
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+
+    def get_queue_items(self, profile_name: Optional[str] = None,
+                        status: Optional[str] = None) -> List[QueuedExecution]:
+        """Get queue items, optionally filtered by profile and/or status"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(QueuedExecution)
+            if profile_name:
+                query = query.filter(QueuedExecution.profile_name == profile_name)
+            if status:
+                query = query.filter(QueuedExecution.status == status)
+            return query.order_by(
+                QueuedExecution.priority.desc(),
+                QueuedExecution.created_at.asc()
+            ).all()
+        finally:
+            db.close()
+
+    def get_queue_item(self, item_id: int) -> Optional[QueuedExecution]:
+        """Get a single queue item by ID"""
+        db = self.SessionLocal()
+        try:
+            return db.query(QueuedExecution).filter(QueuedExecution.id == item_id).first()
+        finally:
+            db.close()
+
+    def get_next_queued_item(self, profile_name: str) -> Optional[QueuedExecution]:
+        """Get the next QUEUED item for a profile (by priority DESC, then created_at ASC)"""
+        db = self.SessionLocal()
+        try:
+            return db.query(QueuedExecution).filter(
+                QueuedExecution.profile_name == profile_name,
+                QueuedExecution.status == "QUEUED"
+            ).order_by(
+                QueuedExecution.priority.desc(),
+                QueuedExecution.created_at.asc()
+            ).first()
+        finally:
+            db.close()
+
+    def is_profile_queue_busy(self, profile_name: str) -> bool:
+        """Check if a profile has any IN_PROGRESS items"""
+        db = self.SessionLocal()
+        try:
+            count = db.query(QueuedExecution).filter(
+                QueuedExecution.profile_name == profile_name,
+                QueuedExecution.status == "IN_PROGRESS"
+            ).count()
+            return count > 0
+        finally:
+            db.close()
+
+    def update_queue_item_status(self, item_id: int, status: str,
+                                  error_message: Optional[str] = None,
+                                  result_json: Optional[str] = None) -> bool:
+        """Update queue item status with timestamps"""
+        db = self.SessionLocal()
+        try:
+            item = db.query(QueuedExecution).filter(QueuedExecution.id == item_id).first()
+            if not item:
+                return False
+            item.status = status
+            if status == "IN_PROGRESS":
+                item.started_at = datetime.now()
+            elif status in ("COMPLETED", "FAILED"):
+                item.completed_at = datetime.now()
+            if error_message is not None:
+                item.error_message = error_message
+            if result_json is not None:
+                item.result_json = result_json
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+
+    def cancel_queue_item(self, item_id: int) -> bool:
+        """Cancel a QUEUED item (only if still QUEUED)"""
+        db = self.SessionLocal()
+        try:
+            item = db.query(QueuedExecution).filter(
+                QueuedExecution.id == item_id,
+                QueuedExecution.status == "QUEUED"
+            ).first()
+            if not item:
+                return False
+            db.delete(item)
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+
+    def retry_queue_item(self, item_id: int) -> Optional[QueuedExecution]:
+        """Reset a FAILED item back to QUEUED for retry"""
+        db = self.SessionLocal()
+        try:
+            item = db.query(QueuedExecution).filter(
+                QueuedExecution.id == item_id,
+                QueuedExecution.status == "FAILED"
+            ).first()
+            if not item:
+                return None
+            item.status = "QUEUED"
+            item.started_at = None
+            item.completed_at = None
+            item.error_message = None
+            item.result_json = None
+            db.commit()
+            db.refresh(item)
+            return item
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+
+    def clear_completed_queue_items(self, profile_name: Optional[str] = None) -> int:
+        """Clear completed and failed items from the queue"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(QueuedExecution).filter(
+                QueuedExecution.status.in_(["COMPLETED", "FAILED"])
+            )
+            if profile_name:
+                query = query.filter(QueuedExecution.profile_name == profile_name)
+            count = query.delete(synchronize_session='fetch')
+            db.commit()
+            return count
         except Exception as e:
             db.rollback()
             raise e

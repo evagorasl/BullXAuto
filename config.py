@@ -37,7 +37,7 @@ class Config:
     # API Configuration
     API_HOST = "0.0.0.0"
     API_PORT = 8000
-    API_RELOAD = True
+    API_RELOAD = False  # Disabled: auto-reload causes issues with log/db file changes
 
     # Chrome profiles configuration
     CHROME_PROFILES = {

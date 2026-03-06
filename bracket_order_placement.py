@@ -233,20 +233,33 @@ class BracketOrderPlacer:
             
             # Get token name from database for screenshot
             coin = db_manager.get_coin_by_address(address)
-            token_name = coin.name if coin and coin.name else "Unknown"
-            
-            # Confirm the order
-            if not self._confirm_order(driver, token_name, bracket, bracket_id):
-                return {"success": False, "error": "Failed to confirm order"}
-            
-            # VALIDATION: Check for duplicate bracket_id before creating order
-            # This prevents database inconsistencies from power outages or interruptions
+            if not coin:
+                logger.error(f"❌ Coin not found in database for address: {address}")
+                return {"success": False, "error": "Coin not found in database"}
+
+            token_name = coin.name or "Unknown"
+
+            # VALIDATION: Check for duplicate bracket_id BEFORE confirming order
+            # This prevents orphaned orders on BullX (order exists on exchange but not in database)
             existing_order = db_manager.get_active_order_by_bracket(coin.id, bracket_id, profile_name)
             if existing_order:
                 logger.error(f"❌ DUPLICATE PREVENTION: Order already exists for bracket_id {bracket_id}")
                 logger.error(f"   Existing Order ID: {existing_order.id}, Created: {existing_order.created_at}")
                 logger.error(f"   Skipping order creation to prevent duplicate")
                 return {"success": False, "error": f"Duplicate order detected: bracket_id {bracket_id} already exists"}
+
+            # Confirm the order (only if no duplicate)
+            if not self._confirm_order(driver, token_name, bracket, bracket_id):
+                return {"success": False, "error": "Failed to confirm order"}
+
+            # DEFENSIVE: Double-check for duplicates after confirmation (defense-in-depth)
+            # This should never trigger, but protects against race conditions
+            double_check = db_manager.get_active_order_by_bracket(coin.id, bracket_id, profile_name)
+            if double_check:
+                logger.critical(f"🚨 RACE CONDITION DETECTED: Duplicate created between checks!")
+                logger.critical(f"   Existing Order ID: {double_check.id}, Created: {double_check.created_at}")
+                logger.critical(f"   This should never happen - investigate immediately")
+                return {"success": False, "error": "Race condition detected"}
             
             # Save order to database
             order_data = {

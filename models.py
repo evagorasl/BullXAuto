@@ -58,7 +58,7 @@ class Order(Base):
 
 class Profile(Base):
     __tablename__ = "profiles"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
     chrome_profile_path = Column(String, nullable=False)
@@ -66,6 +66,22 @@ class Profile(Base):
     is_logged_in = Column(Boolean, default=False)
     last_login = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
+
+class QueuedExecution(Base):
+    __tablename__ = "queued_executions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    profile_name = Column(String, nullable=False, index=True)
+    address = Column(String, nullable=False)
+    total_amount = Column(Float, nullable=False)
+    bracket = Column(Integer, nullable=True)  # Optional bracket override (1-5)
+    status = Column(String, default="QUEUED", nullable=False, index=True)  # QUEUED, IN_PROGRESS, COMPLETED, FAILED
+    priority = Column(Integer, default=0, nullable=False)  # Higher = higher priority
+    created_at = Column(DateTime, default=func.now())
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)  # JSON-serialized result dict
 
 # Pydantic models for API requests/responses
 class LoginRequest(BaseModel):
@@ -181,6 +197,33 @@ class BracketInfo(BaseModel):
     min_market_cap: float
     max_market_cap: float
     description: str
+
+class QueueBracketStrategyRequest(BaseModel):
+    address: str
+    total_amount: float
+    bracket: Optional[int] = None
+    priority: Optional[int] = 0
+
+class QueuedExecutionResponse(BaseModel):
+    id: int
+    profile_name: str
+    address: str
+    total_amount: float
+    bracket: Optional[int]
+    status: str
+    priority: int
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    result_json: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+    @classmethod
+    def from_orm(cls, obj):
+        return cls.model_validate(obj)
 
 # Update forward references
 MultiOrderRequest.model_rebuild()

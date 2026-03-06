@@ -161,6 +161,9 @@ logs/
 *.db
 bullx_auto.db
 
+# API keys file (generated on first run)
+api_keys.txt
+
 # Screenshots
 order_placement_screenshots/
 

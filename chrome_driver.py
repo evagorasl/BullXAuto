@@ -9,6 +9,7 @@ from database import db_manager
 import time
 import logging
 import os
+import sys
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,8 +34,17 @@ class ChromeDriverManager:
         chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument('user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.50 Safari/537.36')
-        #chrome_options.add_argument("--headless")
+        chrome_options.add_argument('user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
+
+        # Headless mode: default to headless on Linux, off on Windows, overridable via env var
+        headless_env = os.environ.get("CHROME_HEADLESS", "").lower()
+        if headless_env == "true" or (headless_env == "" and sys.platform != "win32"):
+            chrome_options.add_argument("--headless=new")
+
+        # VPS compatibility options
+        if sys.platform != "win32":
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
 
         driver = webdriver.Chrome(
             service=ChromeService(WebDriverManager().install()), 
@@ -94,7 +104,6 @@ class BullXAutomator:
             # Not logged in, perform login
             driver = self.driver_manager.get_driver(profile_name)
             driver.get(self.base_url)
-            print(1)
             # Wait for page to load
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
@@ -103,19 +112,42 @@ class BullXAutomator:
                 connect_telegram = WebDriverWait(driver, 2).until(
                     EC.presence_of_element_located((By.XPATH, "//div[text()='Connect Telegram']"))
                 )
-            except:
+            except Exception:
                 logger.info(f"Already logged in.")
                 # Update login status in database
                 db_manager.update_profile_login_status(profile_name, True)
             else:
                 db_manager.update_profile_login_status(profile_name, False)
 
-                logger.info(f"Opened BullX for profile {profile_name}. Please complete login manually.")
-                # Check if already logged in by looking for specific elements
-                connect_telegram.click()
-                WebDriverWait(driver, 300).until(
-                    EC.title_contains("Neo Vision")
-                ) # Give time for page to fully load
+                # Check if running headless (VPS mode)
+                headless_env = os.environ.get("CHROME_HEADLESS", "").lower()
+                is_headless = headless_env == "true" or (headless_env == "" and sys.platform != "win32")
+
+                if is_headless:
+                    # Two-phase login: ask user to provide Telegram login link
+                    logger.info("=" * 60)
+                    logger.info("HEADLESS LOGIN REQUIRED")
+                    logger.info("1. Open Telegram and message @BullXNeoBot")
+                    logger.info("2. Send /start to the bot")
+                    logger.info("3. Copy the login link you receive")
+                    logger.info("4. Paste it below and press Enter")
+                    logger.info("=" * 60)
+                    login_link = input("Paste BullX login link: ").strip()
+                    if login_link:
+                        driver.get(login_link)
+                        WebDriverWait(driver, 60).until(
+                            EC.title_contains("Neo Vision")
+                        )
+                    else:
+                        logger.error("No login link provided. Cannot complete login.")
+                        return False
+                else:
+                    # GUI mode: click Connect Telegram and wait for manual login
+                    logger.info(f"Opened BullX for profile {profile_name}. Please complete login manually.")
+                    connect_telegram.click()
+                    WebDriverWait(driver, 300).until(
+                        EC.title_contains("Neo Vision")
+                    )
             
             logger.info(f"Successfully logged in.")
             # Update login status in database
@@ -186,7 +218,7 @@ class BullXAutomator:
                     EC.presence_of_element_located((By.XPATH, "//*[@id='root']/div[1]/div[2]/main/div/div[1]/div[1]/div[1]/div[1]/div[2]/div[1]/div[1]/span/span[1]"))
                 )
                 coin_data["name"] = name_element.text.strip()
-            except:
+            except Exception:
                 logger.warning(f"Could not extract name for {address}")
             
             # Extract market cap

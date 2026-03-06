@@ -1,21 +1,55 @@
 import os
+import sys
+from pathlib import Path
 from typing import Dict, Any
+from dotenv import load_dotenv
+
+# Load .env file if it exists
+load_dotenv()
+
+
+def _chrome_profile_path(profile_name: str) -> str:
+    """Return the Chrome profile path appropriate for the current OS."""
+    if sys.platform == "win32":
+        return os.path.expanduser(
+            rf"~\AppData\Local\Google\Chrome\User Data\{profile_name}"
+        )
+    elif sys.platform == "darwin":
+        return os.path.expanduser(
+            f"~/Library/Application Support/Google/Chrome/{profile_name}"
+        )
+    else:
+        # Linux
+        return os.path.expanduser(
+            f"~/.config/google-chrome/{profile_name}"
+        )
+
+
+# Base directory for resolving relative paths
+_BASE_DIR = Path(__file__).parent
+
 
 # Application configuration
 class Config:
-    # Database
-    DATABASE_URL = "sqlite:///./bullx_auto.db"
-    
+    # Database - absolute path anchored to project directory
+    DATABASE_URL = f"sqlite:///{_BASE_DIR / 'bullx_auto.db'}"
+
     # API Configuration
     API_HOST = "0.0.0.0"
     API_PORT = 8000
-    API_RELOAD = True
-    
+    API_RELOAD = False  # Disabled: auto-reload causes issues with log/db file changes
+
     # Chrome profiles configuration
     CHROME_PROFILES = {
-        "Saruman": os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Saruman"),
-        "Gandalf": os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Profile Gandalf")
+        "Saruman": _chrome_profile_path("Profile Saruman"),
+        "Gandalf": _chrome_profile_path("Profile Gandalf"),
     }
+
+    # CORS configuration
+    CORS_ORIGINS = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000,http://localhost:3000"
+    ).split(",")
     
     # BullX configuration
     BULLX_BASE_URL = "https://neo.bullx.io"
@@ -25,6 +59,9 @@ class Config:
     
     # Logging
     LOG_LEVEL = "INFO"
+
+    # Application start time (set by main.py at startup)
+    APP_START_TIME = None
     
     # Default strategy parameters
     DEFAULT_STRATEGIES = {
@@ -84,6 +121,7 @@ class ProductionConfig(Config):
     DEBUG = False
     API_RELOAD = False
     LOG_LEVEL = "WARNING"
+    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
 
 # Get configuration based on environment
 def get_config() -> Config:

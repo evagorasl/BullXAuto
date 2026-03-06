@@ -478,8 +478,177 @@ class EnhancedOrderMonitor:
             for task in history
         ]
 
+class QueueProcessor:
+    """Processes queued bracket strategy executions per-profile"""
+
+    def __init__(self):
+        self.scheduler = AsyncIOScheduler()
+        self.is_running = False
+        self.processing_profiles: Dict[str, bool] = {}
+        self._check_interval_seconds = 10
+
+    async def start(self):
+        """Start the queue processing scheduler"""
+        if not self.is_running:
+            # Recover stale IN_PROGRESS items on startup
+            await self._recover_stale_items()
+
+            self.scheduler.start()
+            self.is_running = True
+
+            self.scheduler.add_job(
+                self._process_all_profiles,
+                trigger=IntervalTrigger(seconds=self._check_interval_seconds),
+                id='queue_processor',
+                name='Queue Processor',
+                replace_existing=True,
+                max_instances=1,
+                misfire_grace_time=30
+            )
+            logger.info(f"Queue processor started (checking every {self._check_interval_seconds}s)")
+
+    async def stop(self):
+        """Stop the queue processor"""
+        if self.is_running:
+            self.scheduler.shutdown()
+            self.is_running = False
+            logger.info("Queue processor stopped")
+
+    async def _recover_stale_items(self):
+        """Reset stale IN_PROGRESS items back to QUEUED on startup"""
+        from models import QueuedExecution
+        db = db_manager.SessionLocal()
+        try:
+            stale_cutoff = datetime.now() - timedelta(minutes=10)
+            stale_items = db.query(QueuedExecution).filter(
+                QueuedExecution.status == "IN_PROGRESS",
+                QueuedExecution.started_at < stale_cutoff
+            ).all()
+            for item in stale_items:
+                item.status = "QUEUED"
+                item.started_at = None
+                item.error_message = "Recovered from stale IN_PROGRESS state"
+            db.commit()
+            if stale_items:
+                logger.info(f"Recovered {len(stale_items)} stale queue items")
+        except Exception as e:
+            logger.error(f"Error recovering stale queue items: {e}")
+        finally:
+            db.close()
+
+    async def _process_all_profiles(self):
+        """Check queue for each profile and process next item if idle"""
+        profiles = ["Saruman", "Gandalf"]
+
+        for profile_name in profiles:
+            # Skip if this profile is currently processing something
+            if self.processing_profiles.get(profile_name, False):
+                continue
+
+            # Check if there's an IN_PROGRESS item (stale recovery)
+            if db_manager.is_profile_queue_busy(profile_name):
+                continue
+
+            # Get next queued item for this profile
+            next_item = db_manager.get_next_queued_item(profile_name)
+            if next_item is None:
+                continue
+
+            # Process it (non-blocking for other profiles)
+            asyncio.create_task(self._process_queue_item(profile_name, next_item.id))
+
+    async def _process_queue_item(self, profile_name: str, item_id: int):
+        """Process a single queue item by executing the bracket strategy"""
+        self.processing_profiles[profile_name] = True
+
+        try:
+            # Mark as IN_PROGRESS
+            db_manager.update_queue_item_status(item_id, "IN_PROGRESS")
+
+            # Re-fetch the item to get current data
+            item = db_manager.get_queue_item(item_id)
+            if not item:
+                logger.error(f"Queue item {item_id} not found after marking IN_PROGRESS")
+                return
+
+            logger.info(f"[Queue] Processing item {item_id}: {item.address} "
+                       f"amount={item.total_amount} bracket={item.bracket} "
+                       f"profile={profile_name}")
+
+            # Execute bracket strategy using the existing manager
+            # This is synchronous (Selenium), so run in executor to avoid blocking event loop
+            from bracket_order_placement import bracket_order_manager
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: bracket_order_manager.execute_bracket_strategy(
+                    profile_name=profile_name,
+                    address=item.address,
+                    total_amount=item.total_amount,
+                    bracket=item.bracket
+                )
+            )
+
+            # Serialize result for storage
+            serializable_result = self._make_serializable(result)
+            result_json = json.dumps(serializable_result)
+
+            if result.get("success"):
+                db_manager.update_queue_item_status(
+                    item_id, "COMPLETED", result_json=result_json
+                )
+                logger.info(f"[Queue] Item {item_id} completed successfully: "
+                           f"{result.get('total_placed', 0)} orders placed")
+            else:
+                db_manager.update_queue_item_status(
+                    item_id, "FAILED",
+                    error_message=result.get("error", "Unknown error"),
+                    result_json=result_json
+                )
+                logger.error(f"[Queue] Item {item_id} failed: {result.get('error')}")
+
+        except Exception as e:
+            logger.error(f"[Queue] Error processing item {item_id}: {e}")
+            db_manager.update_queue_item_status(
+                item_id, "FAILED", error_message=str(e)
+            )
+
+        finally:
+            self.processing_profiles[profile_name] = False
+
+            # Close the Chrome driver after queue item completes
+            try:
+                from chrome_driver import chrome_driver_manager
+                chrome_driver_manager.close_driver(profile_name)
+            except Exception as e:
+                logger.error(f"[Queue] Error closing driver after queue item: {e}")
+
+    def _make_serializable(self, obj):
+        """Convert result dict to JSON-serializable form"""
+        if isinstance(obj, dict):
+            return {k: self._make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_serializable(v) for v in obj]
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        elif hasattr(obj, '__dict__') and not isinstance(obj, (str, int, float, bool, type(None))):
+            return str(obj)
+        else:
+            return obj
+
+    def get_queue_status(self) -> dict:
+        """Get current queue processor status"""
+        return {
+            "is_running": self.is_running,
+            "check_interval_seconds": self._check_interval_seconds,
+            "processing_profiles": dict(self.processing_profiles)
+        }
+
 # Global enhanced order monitor instance
 enhanced_order_monitor = EnhancedOrderMonitor()
+
+# Global queue processor instance
+queue_processor = QueueProcessor()
 
 # Compatibility functions for existing code
 async def start_background_tasks():

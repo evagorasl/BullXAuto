@@ -32,16 +32,16 @@ def print_global_cleanup_command():
 def create_virtual_environment():
     """Create virtual environment if it doesn't exist"""
     if venv_path.exists():
-        print("✓ Virtual environment already exists")
+        print("[OK] Virtual environment already exists")
         return True
     
     print("Creating virtual environment...")
     try:
         venv.create(venv_path, with_pip=True)
-        print("✓ Virtual environment created successfully")
+        print("[OK] Virtual environment created successfully")
         return True
     except Exception as e:
-        print(f"✗ Failed to create virtual environment: {e}")
+        print(f"[FAIL] Failed to create virtual environment: {e}")
         return False
 
 def get_venv_python():
@@ -72,10 +72,10 @@ try:
     import sqlalchemy
     import pydantic
     import apscheduler
-    print("✓ All dependencies are installed")
+    print("[OK] All dependencies are installed")
     exit(0)
 except ImportError as e:
-    print(f"✗ Missing dependency: {e}")
+    print(f"[FAIL] Missing dependency: {e}")
     exit(1)
 '''
         result = subprocess.run([str(venv_python), "-c", test_script], 
@@ -83,7 +83,7 @@ except ImportError as e:
         print(result.stdout.strip())
         return result.returncode == 0
     except Exception as e:
-        print(f"✗ Error checking dependencies: {e}")
+        print(f"[FAIL] Error checking dependencies: {e}")
         return False
 
 def install_dependencies():
@@ -93,10 +93,10 @@ def install_dependencies():
     try:
         print("Installing dependencies in virtual environment...")
         subprocess.check_call([str(venv_pip), "install", "-r", "requirements.txt"])
-        print("✓ Dependencies installed successfully")
+        print("[OK] Dependencies installed successfully")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"✗ Failed to install dependencies: {e}")
+        print(f"[FAIL] Failed to install dependencies: {e}")
         return False
 
 def start_application():
@@ -113,20 +113,20 @@ def start_application():
         # Start the server using virtual environment Python
         env = os.environ.copy()
         env['PYTHONPATH'] = str(current_dir)
-        
+
         subprocess.run([
             str(venv_python), "-c",
             """
 import sys
 sys.path.insert(0, '.')
-from main import app
+from config import config
 import uvicorn
 uvicorn.run(
     'main:app',
-    host='0.0.0.0',
-    port=8000,
-    reload=True,
-    log_level='info'
+    host=config.API_HOST,
+    port=config.API_PORT,
+    reload=config.API_RELOAD,
+    log_level=config.LOG_LEVEL.lower()
 )
 """
         ], env=env)
@@ -136,7 +136,7 @@ uvicorn.run(
         print("BullX Automation API stopped")
         print("=" * 50)
     except Exception as e:
-        print(f"✗ Error starting application: {e}")
+        print(f"[FAIL] Error starting application: {e}")
         sys.exit(1)
 
 def main():

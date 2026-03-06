@@ -157,10 +157,9 @@ class OrderMonitor:
     async def process_order_information(self, profile_name: str, order_info: list):
         """Enhanced processing of extracted order information with identification and status updates"""
         try:
-            print(f"\n{'='*60}")
-            print(f"🔍 PROCESSING ORDER INFORMATION FOR {profile_name.upper()}")
-            print(f"{'='*60}")
-            logger.info(f"=== Processing Order Information for {profile_name} ===")
+            logger.info(f"{'='*60}")
+            logger.info(f"PROCESSING ORDER INFORMATION FOR {profile_name.upper()}")
+            logger.info(f"{'='*60}")
             
             # Track all processed orders for missing order analysis
             processed_orders = {}  # {coin_address: {bracket_id: order_data}}
@@ -170,31 +169,23 @@ class OrderMonitor:
                 button_index = button_info.get("button_index", "Unknown")
                 rows = button_info.get("rows", [])
                 
-                print(f"\n📋 Button {button_index}: Found {len(rows)} rows")
-                logger.info(f"Processing button {button_index} with {len(rows)} rows")
+                logger.info(f"Button {button_index}: Found {len(rows)} rows")
                 
                 for row_index, row in enumerate(rows):
                     try:
                         total_rows_processed += 1
-                        print(f"\n  🔸 Row {row_index + 1}:")
-                        
                         # Phase 1: Parse row data
                         parsed_data = self.parse_row_data(row)
-                        
+
                         if not parsed_data:
-                            print(f"    ❌ Could not parse row data")
                             logger.warning(f"  Row {row_index + 1}: Could not parse row data")
                             continue
                         
-                        # Print parsed data for verification
-                        print(f"    🏷️  Side: {parsed_data.get('side', 'N/A')} | Type: {parsed_data.get('type', 'N/A')}")
-                        print(f"    🪙 Token: {parsed_data.get('token', 'N/A')}")
-                        print(f"    💰 Amount: {parsed_data.get('order_amount', 'N/A')}")
-                        print(f"    ⏰ Expiry: {parsed_data.get('expiry', 'N/A')}")
-                        print(f"    🎯 Trigger: {parsed_data.get('trigger_condition', 'N/A')}")
-                        print(f"    📊 Status: {parsed_data.get('order_status', 'N/A')}")
+                        # Log parsed data for verification
+                        logger.info(f"  Row {row_index + 1}: Side={parsed_data.get('side', 'N/A')} Type={parsed_data.get('type', 'N/A')} Token={parsed_data.get('token', 'N/A')}")
+                        logger.info(f"    Amount={parsed_data.get('order_amount', 'N/A')} Trigger={parsed_data.get('trigger_condition', 'N/A')} Status={parsed_data.get('order_status', 'N/A')}")
                         if parsed_data.get('entry_price'):
-                            print(f"    💵 Entry Price: ${parsed_data.get('entry_price'):,.0f}")
+                            logger.info(f"    Entry Price: ${parsed_data.get('entry_price'):,.0f}")
                         
                         # Phase 2: Identify order
                         order_match = self.identify_order(parsed_data, profile_name)
@@ -215,25 +206,23 @@ class OrderMonitor:
                                 'coin': order_match['coin']
                             }
                             
-                            print(f"    ✅ Order Found: ID {order_match['order'].id}, Bracket {order_match['bracket']}, Sub ID {sub_id}")
+                            logger.info(f"    Order Found: ID {order_match['order'].id}, Bracket {order_match['bracket']}, Sub ID {sub_id}")
                         else:
-                            print(f"    ❌ No matching order found in database")
+                            logger.info(f"    No matching order found in database")
                         
                         # Phase 4: Log identification results
                         self.log_order_identification(row_index + 1, parsed_data, order_match)
                         
                     except Exception as e:
-                        print(f"    💥 Error processing row: {e}")
                         logger.error(f"Error processing row {row_index + 1} in button {button_index}: {e}")
             
             # Phase 5: Analyze missing orders
-            print(f"\n{'='*60}")
-            print(f"📊 SUMMARY: Processed {total_rows_processed} total rows")
+            logger.info(f"{'='*60}")
+            logger.info(f"SUMMARY: Processed {total_rows_processed} total rows")
             await self.analyze_missing_orders(profile_name, processed_orders)
-            print(f"{'='*60}\n")
-                        
+            logger.info(f"{'='*60}")
+
         except Exception as e:
-            print(f"💥 ERROR: {e}")
             logger.error(f"Error processing order information for {profile_name}: {e}")
     
     def parse_row_data(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:

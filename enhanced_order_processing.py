@@ -12,6 +12,7 @@ This module handles the improved order processing functionality including:
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import List, Dict, Optional, Any
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -235,7 +236,38 @@ class EnhancedOrderProcessor:
             if not coin:
                 logger.warning(f"  ❌ Could not find coin for token: {token}")
                 return
-            
+
+            # PRIORITY 0: Two-phase order identification for ALL orders
+            # This prevents duplicate matches (same DB order matched multiple times)
+            # Must run FIRST so reconciliation can use the results
+            logger.info(f"  🔍 PRIORITY 0: Identifying all orders (two-phase approach)...")
+            identification_results = await self._identify_all_orders_for_coin(coin, coin_orders, profile_name)
+
+            # PRIORITY 0.5: Reconcile database with BullX (mark cancelled orders)
+            # Uses identification results to find truly missing orders
+            # This handles cases where orders were deleted from BullX but remain ACTIVE in DB
+            logger.info(f"  🔍 PRIORITY 0.5: Reconciling database with BullX...")
+            reconciled_count = self._reconcile_database_with_identification(coin, identification_results, profile_name)
+            if reconciled_count > 0:
+                logger.warning(f"  ⚠️  Reconciled {reconciled_count} orders (marked as CANCELLED in database)")
+            else:
+                logger.info(f"  ✅ Database already in sync with BullX")
+
+            # PRIORITY 0.75: Check for orphaned orders (on BullX but not matched to database)
+            # Uses identification results instead of re-matching
+            logger.info(f"  🔍 PRIORITY 0.75: Checking for orphaned orders...")
+            orphaned_orders = self._detect_orphaned_orders_from_results(coin_orders, identification_results)
+            if orphaned_orders:
+                logger.critical(f"  🚨 ORPHANED ORDERS DETECTED: {len(orphaned_orders)} orders on BullX have no matching ACTIVE database record")
+                logger.critical(f"     These are likely from failed deletions - they should NOT be renewed")
+                for orphan in orphaned_orders:
+                    logger.critical(f"       • Row {orphan['row_index']}: {orphan['parsed_data'].get('trigger_condition')}")
+                    logger.critical(f"         This order exists on BullX but not in database as ACTIVE")
+                # For now, just log the orphans - manual cleanup recommended
+                # Future: Could auto-delete these orphaned orders
+            else:
+                logger.info(f"  ✅ No orphaned orders detected")
+
             # PRIORITY 1: Check for SL hit + any expired condition
             logger.info(f"  🔍 PRIORITY 1: Checking for SL hit + any expired...")
             if self._check_sl_with_any_expired(coin_orders):
@@ -260,13 +292,15 @@ class EnhancedOrderProcessor:
             if individual_expired:
                 logger.info(f"  ⏰ Found {len(individual_expired)} individually expired orders")
                 logger.info(f"  📝 Marking expired orders for individual renewal...")
-                
+
                 # Process each expired order for renewal
                 for expired_order_info in individual_expired:
                     try:
-                        # Identify the order in database
-                        order_match = self._identify_order(expired_order_info['parsed_data'], profile_name)
-                        
+                        row_index = expired_order_info['row_index']
+
+                        # Get identification result from two-phase identification
+                        order_match = identification_results.get(row_index)
+
                         if order_match and order_match.get('order'):
                             # Add to individual expired list for processing
                             expired_renewal_info = {
@@ -276,10 +310,10 @@ class EnhancedOrderProcessor:
                                 'profile_name': profile_name
                             }
                             self.individual_expired_orders.append(expired_renewal_info)
-                            logger.info(f"     ✅ Expired order identified for renewal: Order ID {order_match['order'].id}")
+                            logger.info(f"     ✅ Expired order identified for renewal: Order ID {order_match['order'].id} (matched via {order_match.get('method', 'unknown')})")
                         else:
-                            logger.warning(f"     ❌ Could not identify expired order in database")
-                            
+                            logger.warning(f"     ❌ Could not identify expired order in database (row {row_index})")
+
                     except Exception as e:
                         logger.error(f"     💥 Error processing expired order: {e}")
                 
@@ -297,25 +331,27 @@ class EnhancedOrderProcessor:
             
             # Update trigger conditions for all orders during coin processing
             logger.info(f"  📝 Updating trigger conditions for all {token} orders...")
-            await self._update_trigger_conditions_for_coin(profile_name, coin, coin_orders)
+            await self._update_trigger_conditions_for_coin(profile_name, coin, coin_orders, identification_results)
             
             # Process TP conditions and prepare for deletion
             tp_orders = []
             for order_info in coin_orders:
                 if order_info['is_tp']:
-                    logger.info(f" 🎯 TP DETECTED in row {order_info['row_index']}!")
-                    
-                    # Identify the order in database
-                    order_match = self._identify_order(order_info['parsed_data'], profile_name)
-                    
+                    row_index = order_info['row_index']
+                    logger.info(f" 🎯 TP DETECTED in row {row_index}!")
+
+                    # Get identification result from two-phase identification
+                    order_match = identification_results.get(row_index)
+
                     if order_match and order_match.get('order'):
                         tp_orders.append({
                             'order': order_match['order'],
                             'order_info': order_info,
                             'coin': coin
                         })
+                        logger.info(f"    ✅ Identified as Order ID {order_match['order'].id} (via {order_match.get('method', 'unknown')})")
                     else:
-                        logger.warning(f" ❌ Could not identify order in database for renewal")
+                        logger.warning(f" ❌ Could not identify order in database for renewal (row {row_index})")
             
             # Process missing orders (mark for renewal without BullX deletion)
             if missing_orders:
@@ -503,12 +539,14 @@ class EnhancedOrderProcessor:
                     logger.error(f"    ❌ Failed to click filter button for {coin_name} - skipping deletion")
                     continue
                 
-                # Try to delete entry from BullX using adjusted row index
+                # Try to delete entry from BullX using adjusted row index (with verification)
                 logger.info(f"    🗑️  Attempting to delete BullX entry...")
                 deletion_clicked = await self._delete_bullx_entry(
-                    profile_name, 
-                    button_index, 
-                    adjusted_row_index
+                    profile_name,
+                    button_index,
+                    adjusted_row_index,
+                    expected_coin_address=coin.address,
+                    expected_bracket_id=order.bracket_id
                 )
                 
                 if not deletion_clicked:
@@ -981,6 +1019,393 @@ class EnhancedOrderProcessor:
             logger.error(f"💥 Error identifying order: {e}")
             return None
     
+    def _try_strong_matching(
+        self,
+        parsed_data: Dict[str, Any],
+        active_db_orders: List,
+        matched_order_ids: set,
+        coin: Any
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Try strong matching methods: trigger condition exact match or entry price match.
+        Only considers database orders NOT already matched.
+
+        Args:
+            parsed_data: Parsed BullX order data
+            active_db_orders: List of ACTIVE database orders for this coin
+            matched_order_ids: Set of database order IDs already matched
+            coin: Coin object
+
+        Returns:
+            Match result dict or None if no match
+        """
+        try:
+            trigger_condition = parsed_data.get('trigger_condition', '')
+
+            # Get bracket entries
+            bracket_config = BRACKET_CONFIG[coin.bracket]
+            bracket_entries = bracket_config['entries']
+
+            # Parse entry price from trigger condition
+            entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+
+            # Try to match against unmatched database orders
+            for db_order in active_db_orders:
+                # Skip if already matched
+                if db_order.id in matched_order_ids:
+                    continue
+
+                # METHOD 1: Exact trigger condition match
+                if db_order.trigger_condition and db_order.trigger_condition == trigger_condition:
+                    logger.debug(f"     Strong match (trigger): Row → Order {db_order.id} (bracket {db_order.bracket_id})")
+                    return {
+                        'status': 'success',
+                        'order': db_order,
+                        'bracket_id': db_order.bracket_id,
+                        'method': 'trigger_condition_exact',
+                        'coin': coin,
+                        'bracket_entries': bracket_entries
+                    }
+
+                # METHOD 2: Entry price match
+                if entry_price:
+                    expected_entry = bracket_entries[db_order.bracket_id - 1]
+                    tolerance = 1000
+                    if abs(entry_price - expected_entry) <= tolerance:
+                        logger.debug(f"     Strong match (entry): Row → Order {db_order.id} (bracket {db_order.bracket_id})")
+                        return {
+                            'status': 'success',
+                            'order': db_order,
+                            'bracket_id': db_order.bracket_id,
+                            'method': 'entry_price_match',
+                            'coin': coin,
+                            'bracket_entries': bracket_entries
+                        }
+
+            return None
+
+        except Exception as e:
+            logger.error(f"     Error in strong matching: {e}")
+            return None
+
+    async def _reidentify_order_row_index(self, profile_name: str, button_index: int, order: Order, coin: Any) -> Optional[int]:
+        """
+        Re-identify an order's current row index by re-scraping and re-matching.
+        This prevents stale row index issues when BullX orders change between identification and deletion.
+
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index
+            order: Order object to re-identify
+            coin: Coin object
+
+        Returns:
+            Fresh row index (1-based) if found, None if order not found
+        """
+        try:
+            logger.debug(f"      Re-identifying order {order.id} (bracket_id={order.bracket_id})...")
+
+            # Get current orders from BullX for this filter button
+            result = self.automator.check_orders(profile_name)
+            if not result["success"]:
+                logger.error(f"      Failed to scrape orders for re-identification")
+                return None
+
+            # Find the button_info for our filter button
+            button_orders = None
+            for button_info in result["order_info"]:
+                if button_info.get("button_index") == button_index:
+                    button_orders = button_info.get("rows", [])
+                    break
+
+            if not button_orders:
+                logger.error(f"      No orders found for button {button_index}")
+                return None
+
+            logger.debug(f"      Found {len(button_orders)} current orders on button {button_index}")
+
+            # Parse and prepare coin_orders for identification
+            coin_orders = []
+            for row_index, row in enumerate(button_orders):
+                parsed_data = self._parse_row_data(row)
+                if parsed_data:
+                    coin_orders.append({
+                        'parsed_data': parsed_data,
+                        'button_index': button_index,
+                        'row_index': row_index + 1  # 1-based
+                    })
+
+            if not coin_orders:
+                logger.error(f"      No parseable orders found")
+                return None
+
+            # Use two-phase identification to find our order
+            identification_results = await self._identify_all_orders_for_coin(coin, coin_orders, profile_name)
+
+            # Search for our order in the identification results
+            for row_index, match_result in identification_results.items():
+                if match_result and match_result.get('order'):
+                    if match_result['order'].id == order.id:
+                        logger.debug(f"      ✅ Found order {order.id} at row {row_index}")
+                        return row_index
+
+            logger.warning(f"      Order {order.id} not found in current BullX orders")
+            return None
+
+        except Exception as e:
+            logger.error(f"      Error re-identifying order: {e}")
+            return None
+
+    def _try_order_amount_matching(
+        self,
+        parsed_data: Dict[str, Any],
+        active_db_orders: List,
+        matched_order_ids: set,
+        coin: Any
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Try order amount matching.
+        Matches BullX order_amount (4th column) to database order_amount.
+        Only considers database orders NOT already matched.
+
+        Args:
+            parsed_data: Parsed BullX order data
+            active_db_orders: List of ACTIVE database orders for this coin
+            matched_order_ids: Set of database order IDs already matched
+            coin: Coin object
+
+        Returns:
+            Match result dict or None if no match
+        """
+        try:
+            bullx_amount = parsed_data.get('order_amount', '')
+            if not bullx_amount:
+                return None
+
+            # Get bracket entries for result
+            bracket_config = BRACKET_CONFIG[coin.bracket]
+            bracket_entries = bracket_config['entries']
+
+            # Normalize amount for comparison
+            normalized_bullx = bullx_amount.strip().lower()
+
+            # Try to match against unmatched database orders by order_amount
+            for db_order in active_db_orders:
+                # Skip if already matched
+                if db_order.id in matched_order_ids:
+                    continue
+
+                # Check if order amounts match
+                if db_order.order_amount:
+                    normalized_db = db_order.order_amount.strip().lower()
+                    if normalized_bullx == normalized_db:
+                        logger.debug(f"     Order amount match: Row → Order {db_order.id} (bracket {db_order.bracket_id})")
+                        return {
+                            'status': 'success',
+                            'order': db_order,
+                            'bracket_id': db_order.bracket_id,
+                            'method': 'order_amount_match',
+                            'coin': coin,
+                            'bracket_entries': bracket_entries
+                        }
+
+            return None
+
+        except Exception as e:
+            logger.error(f"     Error in order amount matching: {e}")
+            return None
+
+    def _try_deterministic_matching(
+        self,
+        active_db_orders: List,
+        matched_order_ids: set,
+        coin: Any
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Deterministic matching: If exactly 1 database order remains unmatched, match it.
+        This handles cases like market orders with "1 TP, 1 SL" that don't match by entry price.
+
+        Args:
+            active_db_orders: List of ACTIVE database orders for this coin
+            matched_order_ids: Set of database order IDs already matched
+            coin: Coin object
+
+        Returns:
+            Match result dict or None if not exactly 1 remaining
+        """
+        try:
+            # Find unmatched database orders
+            unmatched_orders = [
+                order for order in active_db_orders
+                if order.id not in matched_order_ids
+            ]
+
+            # If exactly 1 order remains, match it deterministically
+            if len(unmatched_orders) == 1:
+                db_order = unmatched_orders[0]
+
+                # Get bracket entries for result
+                bracket_config = BRACKET_CONFIG[coin.bracket]
+                bracket_entries = bracket_config['entries']
+
+                logger.debug(f"     Deterministic match: Row → Order {db_order.id} (bracket {db_order.bracket_id}) (only remaining order)")
+                return {
+                    'status': 'success',
+                    'order': db_order,
+                    'bracket_id': db_order.bracket_id,
+                    'method': 'deterministic_match',
+                    'coin': coin,
+                    'bracket_entries': bracket_entries
+                }
+
+            return None
+
+        except Exception as e:
+            logger.error(f"     Error in deterministic matching: {e}")
+            return None
+
+    async def _identify_all_orders_for_coin(
+        self,
+        coin: Any,
+        coin_orders: List[Dict],
+        profile_name: str
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        Two-phase order identification for all orders of a coin.
+
+        Phase 1: Strong matching (trigger condition, entry price) - high confidence
+        Phase 2: Weak matching (expiry time) for remaining orders - lower confidence
+
+        This prevents the same database order from being matched multiple times.
+
+        Args:
+            coin: Coin object from database
+            coin_orders: List of BullX orders for this coin
+            profile_name: Profile name
+
+        Returns:
+            Dict mapping row_index to identification result
+        """
+        try:
+            logger.info(f"  🔍 Two-phase identification for {len(coin_orders)} BullX orders...")
+
+            # Get all ACTIVE database orders for this coin and profile
+            db_orders = db_manager.get_orders_by_coin(coin.id)
+            active_db_orders = [
+                order for order in db_orders
+                if order.status == "ACTIVE" and order.profile_name == profile_name
+            ]
+
+            logger.info(f"     Database has {len(active_db_orders)} ACTIVE orders")
+
+            # Track matched database order IDs
+            matched_order_ids = set()
+
+            # Results: row_index -> identification result
+            identification_results = {}
+
+            # PHASE 1: Strong matching (trigger condition, entry price)
+            logger.info(f"     📍 PHASE 1: Strong matching (trigger/entry price)...")
+            phase1_matches = 0
+            for order_info in coin_orders:
+                row_index = order_info['row_index']
+                parsed_data = order_info['parsed_data']
+
+                match_result = self._try_strong_matching(
+                    parsed_data,
+                    active_db_orders,
+                    matched_order_ids,
+                    coin
+                )
+
+                if match_result:
+                    identification_results[row_index] = match_result
+                    matched_order_ids.add(match_result['order'].id)
+                    phase1_matches += 1
+                    logger.info(f"        ✅ Row {row_index} → Order {match_result['order'].id} (bracket {match_result['bracket_id']}) via {match_result['method']}")
+
+            logger.info(f"     ✅ Phase 1 complete: {phase1_matches}/{len(coin_orders)} orders matched")
+
+            # PHASE 2: Order amount matching for remaining orders
+            logger.info(f"     📍 PHASE 2: Order amount matching for remaining orders...")
+            phase2_matches = 0
+            for order_info in coin_orders:
+                row_index = order_info['row_index']
+
+                # Skip if already matched in phase 1
+                if row_index in identification_results:
+                    continue
+
+                parsed_data = order_info['parsed_data']
+
+                match_result = self._try_order_amount_matching(
+                    parsed_data,
+                    active_db_orders,
+                    matched_order_ids,
+                    coin
+                )
+
+                if match_result:
+                    identification_results[row_index] = match_result
+                    matched_order_ids.add(match_result['order'].id)
+                    phase2_matches += 1
+                    logger.info(f"        ✅ Row {row_index} → Order {match_result['order'].id} (bracket {match_result['bracket_id']}) via order_amount")
+
+            logger.info(f"     ✅ Phase 2 complete: {phase2_matches} additional orders matched")
+
+            # PHASE 3: Deterministic matching for remaining orders
+            # If exactly 1 BullX order and 1 DB order remain, match them
+            logger.info(f"     📍 PHASE 3: Deterministic matching for remaining orders...")
+            phase3_matches = 0
+
+            # Get remaining unmatched BullX orders
+            unmatched_bullx_orders = [
+                order_info for order_info in coin_orders
+                if order_info['row_index'] not in identification_results
+            ]
+
+            # If exactly 1 BullX order remains unmatched
+            if len(unmatched_bullx_orders) == 1:
+                order_info = unmatched_bullx_orders[0]
+                row_index = order_info['row_index']
+
+                match_result = self._try_deterministic_matching(
+                    active_db_orders,
+                    matched_order_ids,
+                    coin
+                )
+
+                if match_result:
+                    identification_results[row_index] = match_result
+                    matched_order_ids.add(match_result['order'].id)
+                    phase3_matches += 1
+                    logger.info(f"        ✅ Row {row_index} → Order {match_result['order'].id} (bracket {match_result['bracket_id']}) via deterministic")
+                else:
+                    logger.warning(f"        ❌ Row {row_index}: No match found (might be orphaned)")
+            elif len(unmatched_bullx_orders) > 1:
+                # Multiple unmatched - can't use deterministic matching
+                for order_info in unmatched_bullx_orders:
+                    logger.warning(f"        ❌ Row {order_info['row_index']}: No match found (might be orphaned)")
+
+            logger.info(f"     ✅ Phase 3 complete: {phase3_matches} additional orders matched")
+            logger.info(f"     📊 Total: {len(identification_results)}/{len(coin_orders)} orders identified")
+
+            # Check for unmatched database orders (missing from BullX)
+            unmatched_db_orders = [
+                order for order in active_db_orders
+                if order.id not in matched_order_ids
+            ]
+            if unmatched_db_orders:
+                logger.warning(f"     ⚠️  {len(unmatched_db_orders)} database orders NOT found on BullX:")
+                for order in unmatched_db_orders:
+                    logger.warning(f"        Order {order.id} (bracket {order.bracket_id}) - exists in DB but not on BullX")
+
+            return identification_results
+
+        except Exception as e:
+            logger.error(f"  💥 Error in two-phase identification: {e}")
+            return {}
+
     def _find_coin_by_token(self, token: str) -> Optional[Coin]:
         """Find coin by token name"""
         try:
@@ -988,15 +1413,15 @@ class EnhancedOrderProcessor:
             coin = db_manager.get_coin_by_name(token)
             if coin:
                 return coin
-            
+
             # Try partial name match
             all_coins = db_manager.get_all_coins()
             for coin in all_coins:
                 if coin.name and token.lower() in coin.name.lower():
                     return coin
-            
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Error finding coin by token '{token}': {e}")
             return None
@@ -1278,317 +1703,58 @@ class EnhancedOrderProcessor:
             logger.error(f"Error updating order with BullX refresh: {e}")
             return False
     
-    async def _update_trigger_conditions_for_coin(self, profile_name: str, coin: Coin, coin_orders: List[Dict]):
-        """Update trigger conditions for all orders of a coin using order_amount-based identification"""
+    async def _update_trigger_conditions_for_coin(self, profile_name: str, coin: Coin, coin_orders: List[Dict], identification_results: Dict[int, Dict[str, Any]]):
+        """
+        Update trigger conditions for all orders of a coin using two-phase identification results.
+
+        Args:
+            profile_name: Profile name
+            coin: Coin object
+            coin_orders: List of BullX orders for this coin
+            identification_results: Dict mapping row_index to identification result from two-phase matching
+        """
         try:
             logger.info(f"    🔄 Updating trigger conditions for {len(coin_orders)} {coin.name or coin.address} orders...")
-            
-            # Get all active orders for this coin and profile
-            all_orders = db_manager.get_orders_by_coin(coin.id)
-            active_orders = [o for o in all_orders if o.profile_name == profile_name and o.status == "ACTIVE"]
-            
-            if not active_orders:
-                logger.info(f"      ❌ No active orders found in database for {coin.name or coin.address}")
-                return
-            
-            # Get bracket configuration
-            if not coin.bracket or coin.bracket not in BRACKET_CONFIG:
-                logger.warning(f"      ❌ No valid bracket found for coin")
-                return
-            
-            bracket_config = BRACKET_CONFIG[coin.bracket]
-            bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
-            
-            logger.info(f"      📊 Using bracket {coin.bracket} with entries: {bracket_entries}")
-            logger.info(f"      📋 Found {len(active_orders)} active orders in database")
-            
-            # Track matched orders
-            matched_orders = {}  # {order_id: order_info}
-            unmatched_db_orders = list(active_orders)  # Start with all active orders
-            
-            logger.info(f"      🎯 3-STEP IDENTIFICATION PROCESS:")
-            
-            # STEP 1: Identify "Buy Limit" orders with "Buy below..." trigger conditions (unfulfilled entry orders)
-            logger.info(f"      📍 STEP 1: Identifying unfulfilled 'Buy Limit' orders with 'Buy below...' triggers")
-            
+
+            # Use the identification results from two-phase matching
+            # This ensures we're using the same matches and prevents duplicate matching
+            updates_made = 0
+
             for order_info in coin_orders:
                 try:
+                    row_index = order_info['row_index']
                     parsed_data = order_info.get('parsed_data', {})
                     trigger_condition = parsed_data.get('trigger_condition', '')
-                    order_type = parsed_data.get('type', '')
-                    
+
                     if not trigger_condition:
                         continue
-                    
-                    # Step 1: Match by "Buy below..." trigger (unfulfilled limit orders)
-                    if trigger_condition.startswith("Buy below"):
-                        entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
-                        if entry_price:
-                            sub_id = self._match_entry_to_sub_id(entry_price, bracket_entries)
-                            if sub_id:
-                                # Find the order with this sub_id from unmatched list
-                                matched_order = None
-                                for order in unmatched_db_orders:
-                                    if order.bracket_id == sub_id:
-                                        matched_order = order
-                                        break
-                                
-                                if matched_order:
-                                    matched_orders[matched_order.id] = order_info
-                                    unmatched_db_orders.remove(matched_order)
-                                    logger.info(f"         ✅ Step 1 Match: Entry price ${entry_price:,.0f} → Order ID {matched_order.id} (Bracket {sub_id})")
-                                    
-                                    # Update trigger condition AND order_amount
-                                    await self._update_single_order_trigger_condition(
-                                        matched_order, 
-                                        trigger_condition, 
-                                        parsed_data.get('expiry', ''),
-                                        parsed_data.get('order_amount', '')
-                                    )
-                        
-                except Exception as e:
-                    logger.error(f"         💥 Error in Step 1 matching: {e}")
-            
-            # STEP 2: Match remaining orders by order_amount (fulfilled orders)
-            logger.info(f"      📍 STEP 2: Matching {len(coin_orders) - len(matched_orders)} remaining orders by order_amount")
-            
-            # Group BullX orders by normalized order_amount to handle identical amounts
-            orders_by_amount = {}
-            for order_info in coin_orders:
-                try:
-                    parsed_data = order_info.get('parsed_data', {})
-                    
-                    # Skip if already matched in Step 1
-                    if any(oi is order_info for oi in matched_orders.values()):
-                        continue
-                    
-                    trigger_condition = parsed_data.get('trigger_condition', '')
-                    bullx_amount = parsed_data.get('order_amount', '')
-                    
-                    if not trigger_condition or not bullx_amount:
-                        continue
-                    
-                    # Normalize amount for grouping
-                    amount_key = self._normalize_amount_string(bullx_amount)
-                    
-                    if amount_key not in orders_by_amount:
-                        orders_by_amount[amount_key] = []
-                    
-                    orders_by_amount[amount_key].append(order_info)
-                    
-                except Exception as e:
-                    logger.error(f"         💥 Error grouping orders: {e}")
-            
-            # Match each group of orders
-            for amount_key, bullx_group in orders_by_amount.items():
-                try:
-                    if len(bullx_group) == 1:
-                        # Single order with this amount - match normally
-                        order_info = bullx_group[0]
-                        parsed_data = order_info.get('parsed_data', {})
-                        bullx_amount = parsed_data.get('order_amount', '')
-                        trigger_condition = parsed_data.get('trigger_condition', '')
-                        
-                        if unmatched_db_orders:
-                            matched_order = self._match_by_order_amount(bullx_amount, unmatched_db_orders, trigger_condition)
-                            if matched_order:
-                                matched_orders[matched_order.id] = order_info
-                                unmatched_db_orders.remove(matched_order)
-                                logger.info(f"         ✅ Step 2 Match: Amount '{bullx_amount}' → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
-                                
-                                # Update trigger condition AND order_amount
-                                await self._update_single_order_trigger_condition(
-                                    matched_order, 
-                                    trigger_condition, 
-                                    parsed_data.get('expiry', ''),
-                                    bullx_amount
-                                )
-                    
-                    else:
-                        # Multiple orders with same amount - use expiry-based tiebreaker
-                        logger.info(f"         🔀 Found {len(bullx_group)} orders with same amount '{bullx_group[0].get('parsed_data', {}).get('order_amount', '')}'")
-                        logger.info(f"         Using expiry-based tiebreaker (higher expiry = more recent = higher bracket)")
-                        
-                        # Sort BullX orders by expiry (descending: higher = more recent)
-                        bullx_sorted = []
-                        for order_info in bullx_group:
-                            parsed_data = order_info.get('parsed_data', {})
-                            expiry = parsed_data.get('expiry', '')
-                            expiry_seconds = self._parse_expiry_to_seconds(expiry) if expiry else 0
-                            
-                            bullx_sorted.append({
-                                'order_info': order_info,
-                                'parsed_data': parsed_data,
-                                'expiry': expiry,
-                                'expiry_seconds': expiry_seconds
-                            })
-                        
-                        bullx_sorted.sort(key=lambda x: x['expiry_seconds'], reverse=True)
-                        
-                        # Get potential DB matches for this amount
-                        bullx_amount = bullx_sorted[0]['parsed_data'].get('order_amount', '')
-                        trigger_condition = bullx_sorted[0]['parsed_data'].get('trigger_condition', '')
-                        potential_db_matches = []
-                        
-                        for order in unmatched_db_orders:
-                            if self._amounts_match(bullx_amount, order.order_amount, trigger_condition, order):
-                                potential_db_matches.append(order)
-                        
-                        # Sort DB orders by bracket_id (descending: highest first)
-                        potential_db_matches.sort(key=lambda x: x.bracket_id, reverse=True)
-                        
-                        logger.info(f"         BullX orders sorted by expiry (highest first):")
-                        for idx, bo in enumerate(bullx_sorted):
-                            logger.info(f"           {idx+1}. Expiry: {bo['expiry']} ({bo['expiry_seconds']}s)")
-                        
-                        logger.info(f"         DB orders sorted by bracket_id (highest first):")
-                        for idx, do in enumerate(potential_db_matches):
-                            logger.info(f"           {idx+1}. Order ID {do.id} (Bracket {do.bracket_id})")
-                        
-                        # Match position-wise: highest expiry → highest bracket
-                        matches_made = min(len(bullx_sorted), len(potential_db_matches))
-                        for i in range(matches_made):
-                            bullx_order = bullx_sorted[i]
-                            db_order = potential_db_matches[i]
-                            
-                            logger.info(f"         ✅ Step 2 Match: Expiry '{bullx_order['expiry']}' → Order ID {db_order.id} (Bracket {db_order.bracket_id})")
-                            
-                            matched_orders[db_order.id] = bullx_order['order_info']
-                            unmatched_db_orders.remove(db_order)
-                            
-                            # Update trigger condition AND order_amount
-                            await self._update_single_order_trigger_condition(
-                                db_order,
-                                bullx_order['parsed_data'].get('trigger_condition', ''),
-                                bullx_order['expiry'],
-                                bullx_order['parsed_data'].get('order_amount', '')
-                            )
-                
-                except Exception as e:
-                    logger.error(f"         💥 Error matching group: {e}")
-            
-            # STEP 3: Auto-deduce remaining orders
-            remaining_bullx_orders = len(coin_orders) - len(matched_orders)
-            if remaining_bullx_orders > 0 and len(unmatched_db_orders) > 0:
-                logger.info(f"      📍 STEP 3: Auto-deducing {remaining_bullx_orders} remaining order(s)")
-                logger.info(f"         Remaining BullX orders: {remaining_bullx_orders}")
-                logger.info(f"         Unmatched DB orders: {len(unmatched_db_orders)}")
-                
-                # Collect all unmatched BullX orders
-                unmatched_bullx_orders = []
-                for i, order_info in enumerate(coin_orders):
-                    try:
-                        parsed_data = order_info.get('parsed_data', {})
-                        trigger_condition = parsed_data.get('trigger_condition', '')
-                        order_amount = parsed_data.get('order_amount', '')
-                        
-                        # Check if THIS specific order_info has already been matched
-                        # (not just if the trigger condition matches, since all fulfilled orders have same trigger)
-                        is_already_matched = any(oi is order_info for oi in matched_orders.values())
-                        
-                        if is_already_matched:
-                            continue
-                        
-                        # Extract numeric value for sorting
-                        numeric_amount = self._extract_numeric_value(order_amount) if order_amount else None
-                        
-                        unmatched_bullx_orders.append({
-                            'order_info': order_info,
-                            'parsed_data': parsed_data,
-                            'trigger_condition': trigger_condition,
-                            'order_amount': order_amount,
-                            'numeric_amount': numeric_amount
-                        })
-                        
-                    except Exception as e:
-                        logger.error(f"         💥 Error collecting unmatched order {i+1}: {e}")
-                
-                if not unmatched_bullx_orders:
-                    logger.warning(f"         ⚠️  Could not find any unmatched BullX orders")
-                else:
-                    logger.info(f"         Found {len(unmatched_bullx_orders)} unmatched BullX orders")
-                    
-                    # Case 1: Single remaining order - simple auto-deduce
-                    if len(unmatched_bullx_orders) == 1 and len(unmatched_db_orders) == 1:
-                        logger.info(f"         Case 1: Single order auto-deduction")
-                        
-                        bullx_order = unmatched_bullx_orders[0]
-                        matched_order = unmatched_db_orders[0]
-                        
-                        logger.info(f"         ✅ Step 3 Match: Auto-deduced → Order ID {matched_order.id} (Bracket {matched_order.bracket_id})")
-                        logger.info(f"            BullX: Trigger='{bullx_order['trigger_condition']}', Amount='{bullx_order['order_amount']}'")
-                        
-                        matched_orders[matched_order.id] = bullx_order['order_info']
-                        unmatched_db_orders.remove(matched_order)
-                        
-                        # Update trigger condition AND order_amount
+
+                    # Get the matched order from identification results
+                    match_result = identification_results.get(row_index)
+
+                    if match_result and match_result.get('order'):
+                        matched_order = match_result['order']
+
+                        # Update trigger condition, expiry, and order_amount
                         await self._update_single_order_trigger_condition(
-                            matched_order, 
-                            bullx_order['trigger_condition'], 
-                            bullx_order['parsed_data'].get('expiry', ''),
-                            bullx_order['order_amount']
+                            matched_order,
+                            trigger_condition,
+                            parsed_data.get('expiry', ''),
+                            parsed_data.get('order_amount', '')
                         )
-                    
-                    # Case 2: Multiple remaining orders - match by order_amount heuristic
-                    elif len(unmatched_bullx_orders) > 1 and len(unmatched_db_orders) > 1:
-                        logger.info(f"         Case 2: Multiple orders - using order_amount heuristic")
-                        logger.info(f"            Logic: Smallest amount → Highest bracket sub_id (since entries are ascending)")
-                        
-                        # Sort BullX orders by numeric amount (ascending: smallest first)
-                        bullx_sorted = sorted(
-                            [o for o in unmatched_bullx_orders if o['numeric_amount'] is not None],
-                            key=lambda x: x['numeric_amount']
-                        )
-                        
-                        # Sort DB orders by bracket_id (descending: highest first)
-                        db_sorted = sorted(unmatched_db_orders, key=lambda x: x.bracket_id, reverse=True)
-                        
-                        logger.info(f"            BullX orders sorted by amount (smallest first):")
-                        for idx, bo in enumerate(bullx_sorted):
-                            logger.info(f"              {idx+1}. Amount: {bo['order_amount']} (numeric: {bo['numeric_amount']:.2f})")
-                        
-                        logger.info(f"            DB orders sorted by bracket_id (highest first):")
-                        for idx, do in enumerate(db_sorted):
-                            logger.info(f"              {idx+1}. Order ID {do.id} (Bracket {do.bracket_id})")
-                        
-                        # Match smallest amount to highest bracket_id, second smallest to second highest, etc.
-                        matches_made = min(len(bullx_sorted), len(db_sorted))
-                        for i in range(matches_made):
-                            bullx_order = bullx_sorted[i]
-                            db_order = db_sorted[i]
-                            
-                            logger.info(f"         ✅ Step 3 Match: Amount '{bullx_order['order_amount']}' → Order ID {db_order.id} (Bracket {db_order.bracket_id})")
-                            
-                            matched_orders[db_order.id] = bullx_order['order_info']
-                            unmatched_db_orders.remove(db_order)
-                            
-                            # Update trigger condition AND order_amount
-                            await self._update_single_order_trigger_condition(
-                                db_order, 
-                                bullx_order['trigger_condition'], 
-                                bullx_order['parsed_data'].get('expiry', ''),
-                                bullx_order['order_amount']
-                            )
-                    
-                    # Case 3: Mismatch in counts - log warning
+                        updates_made += 1
+                        logger.info(f"      ✅ Updated Order {matched_order.id} (bracket {matched_order.bracket_id}) trigger: {trigger_condition[:50]}...")
                     else:
-                        logger.warning(f"         ⚠️  Order count mismatch:")
-                        logger.warning(f"            BullX: {len(unmatched_bullx_orders)} orders, DB: {len(unmatched_db_orders)} orders")
-                        logger.warning(f"            Cannot reliably auto-deduce")
-            
-            # Log any unmatched orders
-            if len(unmatched_db_orders) > 0 or remaining_bullx_orders > len(unmatched_db_orders):
-                logger.warning(f"      ⚠️  Identification incomplete:")
-                logger.warning(f"         BullX orders: {len(coin_orders)}, Matched: {len(matched_orders)}")
-                logger.warning(f"         DB orders: {len(active_orders)}, Unmatched: {len(unmatched_db_orders)}")
-                for order in unmatched_db_orders:
-                    logger.warning(f"         ❌ Unmatched DB Order ID {order.id} (Bracket {order.bracket_id})")
-            
-            logger.info(f"      📊 Identification complete: {len(matched_orders)}/{len(coin_orders)} BullX orders matched")
-                        
+                        logger.debug(f"      ⏭️  Row {row_index}: No match, skipping trigger update")
+
+                except Exception as e:
+                    logger.error(f"      💥 Error updating trigger condition: {e}")
+
+            logger.info(f"    ✅ Trigger condition updates complete: {updates_made}/{len(coin_orders)} orders updated")
+
         except Exception as e:
             logger.error(f"💥 Error updating trigger conditions for coin: {e}")
-    
+
     def _identify_remaining_order(self, parsed_data: Dict[str, Any], unmatched_orders: List[Order], 
                                 trigger_condition: str, expiry: str) -> Optional[Order]:
         """Identify remaining orders using alternative methods (trigger condition, expiry time, fallback)"""
@@ -2066,9 +2232,15 @@ class EnhancedOrderProcessor:
                 return
             
             logger.info(f"    🪙 Found coin: {coin.name or coin.address} (Bracket: {coin.bracket})")
-            
-            # Try to delete entry from BullX first
-            deletion_success = await self._delete_bullx_entry(order.profile_name, button_index, row_index)
+
+            # Try to delete entry from BullX first (with verification)
+            deletion_success = await self._delete_bullx_entry(
+                order.profile_name,  # type: ignore
+                button_index,
+                row_index,
+                expected_coin_address=coin.address,  # type: ignore
+                expected_bracket_id=order.bracket_id  # type: ignore
+            )
             
             if not deletion_success:
                 logger.error(f"    ❌ BullX deletion failed - skipping database update for order {order.id}")
@@ -2246,15 +2418,16 @@ class EnhancedOrderProcessor:
             logger.info(f"⏰ PROCESSING {len(self.individual_expired_orders)} INDIVIDUAL EXPIRED ORDERS")
             logger.info(f"{'='*80}")
             
-            # Sort expired orders by row_index (ascending) to process top-to-bottom
-            # This ensures we can accurately track and adjust for row shifts
-            expired_orders_sorted = sorted(self.individual_expired_orders, 
-                                          key=lambda x: x['order_info']['row_index'])
-            
-            # Track deletions to adjust row indices as rows shift up
-            deletions_made = 0
+            # Sort expired orders by (button_index, row_index) so we process each
+            # filter's orders in ascending row order, allowing accurate row shift tracking
+            expired_orders_sorted = sorted(self.individual_expired_orders,
+                                          key=lambda x: (x['order_info']['button_index'], x['order_info']['row_index']))
+
+            # Track deletions PER FILTER BUTTON to correctly adjust row indices
+            # Rows only shift on the filter they were deleted from
+            deletions_per_button: Dict[int, int] = {}
             orders_processed = 0
-            
+
             for expired_order_dict in expired_orders_sorted:
                 try:
                     order = expired_order_dict['order']
@@ -2262,45 +2435,87 @@ class EnhancedOrderProcessor:
                     coin = expired_order_dict['coin']
                     button_index = order_info['button_index']
                     original_row_index = order_info['row_index']
-                    
-                    # Adjust row index based on previous deletions (rows shift up)
-                    adjusted_row_index = original_row_index - deletions_made
+
+                    # Adjust row index based on deletions made on THIS filter button only
+                    deletions_made_for_button = deletions_per_button.get(button_index, 0)
+                    adjusted_row_index = original_row_index - deletions_made_for_button
                     
                     logger.info(f"\n📝 Processing expired order: ID {order.id} (Bracket {order.bracket_id})")
                     logger.info(f"   Coin: {coin.name or coin.address}")
-                    logger.info(f"   Original row: {original_row_index}, Adjusted row: {adjusted_row_index}, Deletions made: {deletions_made}")
-                    
-                    # Step 1: Re-click filter button
+                    logger.info(f"   Original row: {original_row_index}, Adjusted row: {adjusted_row_index}, Deletions on filter {button_index}: {deletions_made_for_button}")
+
+                    # Step 1: Click filter button to ensure correct coin is displayed
+                    logger.info(f"   🔄 Selecting filter {button_index}...")
                     filter_success = await self._click_coin_filter_button(profile_name, button_index)
                     if not filter_success:
-                        logger.error(f"   ❌ Failed to click filter button - skipping")
+                        logger.error(f"   ❌ Failed to select filter button - skipping")
                         # Don't increment deletions_made since deletion didn't happen
                         continue
-                    
-                    # Step 2: Delete from BullX using adjusted row index
+
+                    # Step 2: RE-IDENTIFY ORDER to get fresh row index
+                    # This prevents stale row index issues when BullX orders change between identification and deletion
+                    logger.info(f"   🔍 Re-identifying order to get current row index...")
+                    fresh_row_index = await self._reidentify_order_row_index(profile_name, button_index, order, coin)
+
+                    if fresh_row_index is None:
+                        logger.error(f"   ❌ Could not find order on BullX - may have been deleted or filled")
+                        logger.error(f"   ⚠️  Skipping deletion to prevent deleting wrong order")
+                        continue
+
+                    logger.info(f"   ✅ Order re-identified at row {fresh_row_index} (was adjusted to {adjusted_row_index})")
+
+                    # Step 3: Get row count BEFORE deletion for verification
+                    logger.info(f"   📊 Getting row count before deletion...")
+                    rows_before = await self._get_button_row_count(profile_name, button_index)
+                    logger.info(f"   📊 Rows before deletion: {rows_before}")
+
+                    # Step 4: Delete from BullX using FRESH row index (with verification)
                     logger.info(f"   🗑️  Deleting expired order from BullX...")
-                    deletion_success = await self._delete_bullx_entry(profile_name, button_index, adjusted_row_index)
-                    
+                    deletion_success = await self._delete_bullx_entry(
+                        profile_name, button_index, fresh_row_index,
+                        expected_coin_address=coin.address,
+                        expected_bracket_id=order.bracket_id
+                    )
+
                     if not deletion_success:
-                        logger.error(f"   ❌ Failed to delete from BullX - skipping")
+                        logger.error(f"   ❌ Failed to click delete button - skipping")
                         # Don't increment deletions_made since deletion didn't happen
                         continue
-                    
+
                     # Wait for deletion to process
-                    time.sleep(2)
-                    
-                    # Step 3: Update database to EXPIRED (not COMPLETED, since it expired individually)
-                    logger.info(f"   📝 Updating database to EXPIRED...")
-                    db_success = db_manager.update_order_status(order.id, "EXPIRED")
-                    
-                    if not db_success:
-                        logger.error(f"   ❌ Failed to update database - skipping")
-                        # Don't increment deletions_made since we skip database update on failure
+                    time.sleep(3)
+
+                    # Step 5: VERIFY deletion worked by checking row count
+                    logger.info(f"   🔍 Verifying deletion...")
+                    rows_after = await self._get_button_row_count(profile_name, button_index)
+                    logger.info(f"   📊 Rows after deletion: {rows_after}")
+
+                    if rows_after != rows_before - 1:
+                        logger.error(f"   ❌ DELETION VERIFICATION FAILED!")
+                        logger.error(f"      Expected rows: {rows_before - 1}, Actual rows: {rows_after}")
+                        logger.error(f"      Order may still exist on BullX - NOT marking as EXPIRED")
+                        logger.error(f"      This prevents orphaned orders and duplicate renewals")
+                        # Don't mark as EXPIRED, don't renew
                         continue
-                    
+
+                    logger.info(f"   ✅ Deletion verified: {rows_before} → {rows_after} rows")
+
+                    # Step 6: CRITICAL - Mark as EXPIRED IMMEDIATELY after verified BullX deletion
+                    # This ensures if crash happens, at least old order is marked properly
+                    # Using atomic transaction to prevent partial updates
+                    logger.info(f"   📝 Marking order {order.id} as EXPIRED immediately...")
+                    db_success = db_manager.mark_order_for_replacement(order.id, "EXPIRED")
+
+                    if not db_success:
+                        logger.error(f"   ❌ Failed to mark order as EXPIRED - ORDER ORPHANED!")
+                        logger.error(f"   ⚠️  Order {order.id} deleted from BullX but still ACTIVE in database")
+                        logger.error(f"   🔧 Manual intervention required - run startup recovery")
+                        # Don't increment deletions_made since database update failed
+                        continue
+
                     logger.info(f"   ✅ Order {order.id} marked as EXPIRED")
-                    
-                    # Step 4: Mark for renewal
+
+                    # Step 7: Mark for renewal
                     renewal_info = {
                         'order_id': order.id,
                         'coin_address': coin.address,
@@ -2316,10 +2531,10 @@ class EnhancedOrderProcessor:
                     
                     self.orders_for_renewal.append(renewal_info)
                     
-                    # Increment deletions counter since this deletion was successful
-                    deletions_made += 1
+                    # Increment per-button deletion counter since this deletion was successful
+                    deletions_per_button[button_index] = deletions_made_for_button + 1
                     orders_processed += 1
-                    logger.info(f"   ✅ Order {order.id} marked for renewal (total deletions: {deletions_made})")
+                    logger.info(f"   ✅ Order {order.id} marked for renewal (deletions on filter {button_index}: {deletions_per_button[button_index]})")
                     
                 except Exception as e:
                     logger.error(f"   💥 Error processing individual expired order: {e}")
@@ -2695,43 +2910,484 @@ class EnhancedOrderProcessor:
         except Exception as e:
             logger.error(f"      💥 Error in _delete_all_bullx_entries_for_coin: {e}")
             return False
-    
-    async def _delete_bullx_entry(self, profile_name: str, button_index: int, row_index: int) -> bool:
-        """Delete entry from BullX using the specified XPATH"""
+
+    def _detect_orphaned_orders_from_results(self, coin_orders: List[Dict], identification_results: Dict[int, Dict[str, Any]]) -> List[Dict]:
+        """
+        Detect orphaned orders using two-phase identification results.
+        Orphaned orders are those on BullX that couldn't be matched to any ACTIVE database order.
+
+        Args:
+            coin_orders: List of BullX orders for this coin
+            identification_results: Dict mapping row_index to identification result
+
+        Returns:
+            List of orphaned order dictionaries
+        """
+        try:
+            orphaned = []
+
+            for order_info in coin_orders:
+                row_index = order_info['row_index']
+
+                # Check if this order was matched during two-phase identification
+                match_result = identification_results.get(row_index)
+
+                if not match_result or not match_result.get('order'):
+                    # Order exists on BullX but couldn't be matched to database - it's orphaned
+                    orphaned.append(order_info)
+                    logger.debug(f"     Orphaned: Row {row_index} - no database match found")
+
+            return orphaned
+
+        except Exception as e:
+            logger.error(f"      💥 Error detecting orphaned orders from results: {e}")
+            return []
+
+    async def _detect_orphaned_orders(self, coin: Any, coin_orders: List[Dict], profile_name: str) -> List[Dict]:
+        """
+        Detect orphaned orders: orders that exist on BullX but not in database as ACTIVE.
+        These are typically from failed deletions.
+
+        Args:
+            coin: Coin object from database
+            coin_orders: List of orders from BullX
+            profile_name: Profile name
+
+        Returns:
+            List of orphaned order dictionaries
+        """
+        try:
+            # Get all orders from database for this coin
+            db_orders = db_manager.get_orders_by_coin(coin.id)
+            # Filter by profile and ACTIVE status
+            active_db_orders = [
+                order for order in db_orders
+                if order.status == "ACTIVE" and order.profile_name == profile_name
+            ]
+
+            # If counts match, no orphans
+            if len(coin_orders) == len(active_db_orders):
+                return []
+
+            # If more orders on BullX than in database, we likely have orphans
+            if len(coin_orders) > len(active_db_orders):
+                logger.warning(f"     BullX has {len(coin_orders)} orders, DB has {len(active_db_orders)} ACTIVE orders")
+
+                # Try to match each BullX order to a database order
+                orphaned = []
+                for bullx_order in coin_orders:
+                    # Try to identify this BullX order in the database
+                    order_match = self._identify_order(bullx_order['parsed_data'], profile_name)
+
+                    if not order_match or order_match.get('status') != 'success':
+                        # Could not match to any ACTIVE database order - it's orphaned
+                        orphaned.append(bullx_order)
+
+                return orphaned
+
+            return []
+
+        except Exception as e:
+            logger.error(f"      💥 Error detecting orphaned orders: {e}")
+            return []
+
+    def _extract_bracket_id_from_bullx_order(self, parsed_data: Dict[str, Any], bracket_entries: List[float]) -> Optional[int]:
+        """
+        Extract bracket_id directly from BullX order data without matching to database.
+        Parses trigger condition to get entry price, then matches to bracket entries.
+
+        Args:
+            parsed_data: Parsed BullX order data
+            bracket_entries: List of bracket entry prices [entry1, entry2, entry3, entry4]
+
+        Returns:
+            Bracket sub-id (1-4) or None if cannot determine
+        """
+        try:
+            trigger_condition = parsed_data.get('trigger_condition', '')
+
+            # Parse entry price from trigger condition
+            entry_price = self._parse_trigger_condition_entry_price(trigger_condition)
+
+            if not entry_price:
+                # Not an entry order (might be TP/SL order)
+                return None
+
+            # Match entry price to bracket entries (with tolerance)
+            tolerance = 1000  # 1000 unit tolerance
+            for i, bracket_entry in enumerate(bracket_entries):
+                difference = abs(entry_price - bracket_entry)
+                if difference <= tolerance:
+                    bracket_id = i + 1  # Convert 0-based to 1-based
+                    logger.debug(f"     Matched entry ${entry_price:,.0f} to bracket_id {bracket_id} (entry ${bracket_entry:,.0f})")
+                    return bracket_id
+
+            logger.warning(f"     Could not match entry price ${entry_price:,.0f} to any bracket entry")
+            return None
+
+        except Exception as e:
+            logger.error(f"     Error extracting bracket_id from BullX order: {e}")
+            return None
+
+    def _reconcile_database_with_identification(
+        self,
+        coin: Any,
+        identification_results: Dict[int, Dict[str, Any]],
+        profile_name: str
+    ) -> int:
+        """
+        Reconcile database with BullX using two-phase identification results.
+
+        MORE CONSERVATIVE APPROACH:
+        - Only marks orders as CANCELLED if database has MORE orders than BullX
+        - This prevents false positives when matching logic fails
+        - Logs warnings for uncertain cases requiring manual review
+
+        Args:
+            coin: Coin object from database
+            identification_results: Dict mapping row_index to identification result
+            profile_name: Profile name
+
+        Returns:
+            Number of orders reconciled (marked as CANCELLED)
+        """
+        try:
+            # Get all ACTIVE database orders for this coin and profile
+            db_orders = db_manager.get_orders_by_coin(coin.id)
+            active_db_orders = [
+                order for order in db_orders
+                if order.status == "ACTIVE" and order.profile_name == profile_name
+            ]
+
+            if not active_db_orders:
+                logger.info(f"     No ACTIVE orders in database for this coin")
+                return 0
+
+            # Build set of database order IDs that were matched to BullX orders
+            matched_db_order_ids = set()
+            for match_result in identification_results.values():
+                if match_result and match_result.get('order'):
+                    matched_db_order_ids.add(match_result['order'].id)
+
+            # Count BullX orders (non-None identification results)
+            bullx_order_count = sum(1 for result in identification_results.values() if result)
+            db_active_count = len(active_db_orders)
+            matched_count = len(matched_db_order_ids)
+
+            logger.info(f"     📊 BullX has {bullx_order_count} orders, DB has {db_active_count} ACTIVE orders")
+            logger.info(f"     📊 Successfully matched {matched_count} orders")
+
+            # Find unmatched database orders
+            unmatched_orders = [
+                order for order in active_db_orders
+                if order.id not in matched_db_order_ids
+            ]
+
+            if not unmatched_orders:
+                logger.info(f"     ✅ All database orders matched to BullX (no reconciliation needed)")
+                return 0
+
+            logger.warning(f"     ⚠️  Found {len(unmatched_orders)} unmatched database orders")
+
+            # CONSERVATIVE CHECK: Only reconcile if DB has more ACTIVE orders than BullX has orders
+            # This prevents marking orders as CANCELLED when matching just failed
+            if db_active_count <= bullx_order_count:
+                logger.warning(f"     ⚠️  Database has {db_active_count} ACTIVE orders, BullX has {bullx_order_count} orders")
+                logger.warning(f"     ⚠️  NOT marking orders as CANCELLED - matching may have failed")
+                logger.warning(f"     ⚠️  Unmatched orders (may need manual review):")
+                for order in unmatched_orders:
+                    logger.warning(f"        - Order {order.id}: bracket_id={order.bracket_id}, entry=${order.entry_price:,.0f}")
+                    logger.warning(f"          Trigger: {order.trigger_condition or 'None'}")
+                    logger.warning(f"          Amount: {order.order_amount or 'None'}")
+                return 0
+
+            # DB has MORE orders than BullX - some orders are definitely missing from BullX
+            # Mark unmatched orders as CANCELLED
+            reconciled_count = 0
+            logger.warning(f"     🔄 RECONCILIATION: DB has {db_active_count} orders but BullX only has {bullx_order_count}")
+            logger.warning(f"     🔄 Marking {len(unmatched_orders)} unmatched orders as CANCELLED...")
+
+            for db_order in unmatched_orders:
+                logger.warning(f"        Order {db_order.id} (bracket_id {db_order.bracket_id}) - NOT on BullX")
+                logger.warning(f"           Trigger: {db_order.trigger_condition or 'None'}")
+                logger.warning(f"           Entry: ${db_order.entry_price:,.0f}")
+
+                # Mark as CANCELLED in database
+                success = db_manager.mark_order_for_replacement(db_order.id, "CANCELLED")
+
+                if success:
+                    logger.info(f"           ✅ Marked as CANCELLED")
+                    reconciled_count += 1
+                else:
+                    logger.error(f"           ❌ Failed to mark as CANCELLED")
+
+            if reconciled_count > 0:
+                logger.info(f"     ✅ Reconciled {reconciled_count} orders with BullX state")
+
+            return reconciled_count
+
+        except Exception as e:
+            logger.error(f"      💥 Error reconciling database with identification results: {e}")
+            return 0
+
+    async def _reconcile_database_with_bullx(self, coin: Any, coin_orders: List[Dict], profile_name: str) -> int:
+        """
+        Reconcile database with BullX by marking orders as CANCELLED if they exist in DB but not on BullX.
+        This fixes desynchronization issues where orders were deleted from BullX but remain ACTIVE in database.
+
+        Args:
+            coin: Coin object from database
+            coin_orders: List of orders from BullX for this coin
+            profile_name: Profile name
+
+        Returns:
+            Number of orders reconciled (marked as CANCELLED)
+        """
+        try:
+            # Get all orders from database for this coin
+            db_orders = db_manager.get_orders_by_coin(coin.id)
+            # Filter by profile and ACTIVE status
+            active_db_orders = [
+                order for order in db_orders
+                if order.status == "ACTIVE" and order.profile_name == profile_name
+            ]
+
+            # If no active orders in DB, nothing to reconcile
+            if not active_db_orders:
+                logger.info(f"     No ACTIVE orders in database for this coin")
+                return 0
+
+            # Get bracket entries for this coin
+            if not coin.bracket or coin.bracket not in BRACKET_CONFIG:
+                logger.error(f"     Invalid bracket {coin.bracket} for coin {coin.name}")
+                return 0
+
+            bracket_config = BRACKET_CONFIG[coin.bracket]
+            bracket_entries = bracket_config['entries']  # [entry1, entry2, entry3, entry4]
+
+            logger.info(f"     Using bracket {coin.bracket} with entries: {bracket_entries}")
+
+            # Build a set of bracket_ids that exist on BullX (extract directly, don't match to DB)
+            bullx_bracket_ids = set()
+            for bullx_order in coin_orders:
+                # Extract bracket_id directly from trigger condition
+                bracket_id = self._extract_bracket_id_from_bullx_order(
+                    bullx_order['parsed_data'],
+                    bracket_entries
+                )
+                if bracket_id:
+                    bullx_bracket_ids.add(bracket_id)
+
+            logger.info(f"     BullX has {len(bullx_bracket_ids)} orders: {sorted(bullx_bracket_ids)}")
+            logger.info(f"     Database has {len(active_db_orders)} ACTIVE orders")
+
+            # Check each database ACTIVE order to see if it exists on BullX
+            reconciled_count = 0
+            for db_order in active_db_orders:
+                bracket_id = db_order.bracket_id
+
+                # If this bracket_id doesn't exist on BullX, mark as CANCELLED
+                if bracket_id not in bullx_bracket_ids:
+                    logger.warning(f"     🔄 RECONCILIATION: Order {db_order.id} (bracket_id {bracket_id}) exists in DB but NOT on BullX")
+                    logger.warning(f"        Marking as CANCELLED to allow replacement...")
+
+                    # Mark as CANCELLED in database
+                    success = db_manager.mark_order_for_replacement(db_order.id, "CANCELLED")
+
+                    if success:
+                        logger.info(f"        ✅ Order {db_order.id} marked as CANCELLED")
+                        reconciled_count += 1
+                    else:
+                        logger.error(f"        ❌ Failed to mark order {db_order.id} as CANCELLED")
+
+            if reconciled_count > 0:
+                logger.info(f"     ✅ Reconciled {reconciled_count} orders with BullX state")
+            else:
+                logger.info(f"     ✅ All database orders match BullX (no reconciliation needed)")
+
+            return reconciled_count
+
+        except Exception as e:
+            logger.error(f"      💥 Error reconciling database with BullX: {e}")
+            return 0
+
+    async def _get_button_row_count(self, profile_name: str, button_index: int) -> int:
+        """
+        Get the current number of rows for a specific filter button.
+        Used to verify deletions worked correctly.
+
+        Args:
+            profile_name: Profile name
+            button_index: Filter button index
+
+        Returns:
+            Number of visible rows, or -1 if error
+        """
         try:
             driver = self.driver_manager.get_driver(profile_name)
-            
+
+            # Click the filter button to ensure we're seeing the right orders
+            filter_success = await self._click_coin_filter_button(profile_name, button_index)
+            if not filter_success:
+                logger.error(f"      ❌ Failed to click filter button {button_index}")
+                return -1
+
+            # Wait a bit for the UI to update
+            time.sleep(1)
+
+            # Count visible rows using the same XPATH pattern as deletion
+            # Rows follow pattern: //*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[N]
+            base_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a"
+
+            # Find all matching rows
+            rows = driver.find_elements(By.XPATH, base_xpath)
+            row_count = len(rows)
+
+            return row_count
+
+        except Exception as e:
+            logger.error(f"      💥 Error getting row count: {e}")
+            return -1
+
+    async def _verify_row_matches_coin(self, profile_name: str, row_index: int, expected_coin_address: str, expected_bracket_id: Optional[int] = None) -> bool:
+        """
+        Verify that the row at row_index matches the expected coin and bracket_id.
+        This prevents deleting the wrong order if button indices have shifted.
+
+        Args:
+            profile_name: Chrome profile name
+            row_index: Row index to verify (1-based)
+            expected_coin_address: Expected coin address
+            expected_bracket_id: Optional bracket sub ID for additional verification
+
+        Returns:
+            True if row matches expected coin, False otherwise
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+
+            # Get the row element
+            row_xpath = f"//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[{row_index}]"
+
+            try:
+                row_element = driver.find_element(By.XPATH, row_xpath)
+
+                # Get row text and href
+                row_text = row_element.text.strip()
+                href = row_element.get_attribute("href")
+
+                if not href:
+                    logger.error(f"    ❌ No href found for row {row_index}")
+                    return False
+
+                # Create row dict for parsing
+                row_dict = {
+                    "main_text": row_text,
+                    "href": href
+                }
+
+                # Parse row data
+                parsed_data = self._parse_row_data(row_dict)
+                if not parsed_data:
+                    logger.error(f"    ❌ Could not parse row {row_index} for verification")
+                    return False
+
+                # Extract coin address from href query parameter
+                # Href format: "terminal?chainId=1399811149&address=DNhQZ1CE9qZ2FNrVhsCXwQJ2vZG8ufZkcYakTS5Jpump"
+                if 'address=' in href:
+                    row_coin_address = href.split('address=')[-1].split('&')[0]
+                else:
+                    row_coin_address = href.split('/')[-1] if '/' in href else href
+
+                # Get trigger condition to verify bracket_id
+                trigger_condition = parsed_data.get('trigger_condition', '')
+
+                # Verify coin address matches
+                if row_coin_address.lower() != expected_coin_address.lower():
+                    logger.error(f"    ❌ ROW VERIFICATION FAILED: Wrong coin!")
+                    logger.error(f"       Expected coin: {expected_coin_address}")
+                    logger.error(f"       Row coin: {row_coin_address}")
+                    logger.error(f"       🚨 THIS WOULD HAVE DELETED THE WRONG ORDER!")
+                    return False
+
+                logger.info(f"    ✅ Row verification passed:")
+                logger.info(f"       Coin address matches: {row_coin_address}")
+                logger.info(f"       Trigger condition: {trigger_condition}")
+                if expected_bracket_id:
+                    logger.info(f"       Expected bracket_id: {expected_bracket_id}")
+
+                return True
+
+            except Exception as e:
+                logger.error(f"    ❌ Error finding row {row_index} for verification: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"    💥 Error verifying row: {e}")
+            return False
+
+    async def _delete_bullx_entry(self, profile_name: str, button_index: int, row_index: int,
+                                  expected_coin_address: Optional[str] = None, expected_bracket_id: Optional[int] = None) -> bool:
+        """
+        Delete entry from BullX using the specified XPATH.
+        Optionally verifies the row matches expected coin before deleting.
+
+        Args:
+            profile_name: Chrome profile name
+            button_index: Filter button index
+            row_index: Row index to delete (1-based)
+            expected_coin_address: Optional coin address for verification
+            expected_bracket_id: Optional bracket sub ID for verification
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+
+            # CRITICAL SAFETY CHECK: Verify we're deleting the right order
+            if expected_coin_address:
+                logger.info(f"    🔍 Verifying row {row_index} before deletion...")
+                verification_passed = await self._verify_row_matches_coin(
+                    profile_name, row_index, expected_coin_address, expected_bracket_id
+                )
+
+                if not verification_passed:
+                    logger.error(f"    ❌ DELETION BLOCKED: Row verification failed!")
+                    logger.error(f"    🛡️  This prevented deleting the wrong order")
+                    return False
+
             # Construct the XPATH for the specific row
             xpath = f"//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]/a[{row_index}]/div[11]/div/button"
-            
+
             logger.info(f"    🗑️  Deleting BullX entry for row {row_index}")
-            
+
             try:
                 # Wait for the element to be clickable
                 delete_button = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.XPATH, xpath))
                 )
-                
+
                 # Scroll into view if needed
                 driver.execute_script("arguments[0].scrollIntoView(true);", delete_button)
                 time.sleep(0.5)
-                
+
                 # Click the button
                 delete_button.click()
                 logger.info(f"    ✅ Successfully clicked delete button for row {row_index}")
-                
+
                 # Wait for deletion to process
                 time.sleep(1)
-                
+
                 return True
-                
+
             except TimeoutException:
                 logger.error(f"    ❌ Delete button not found or not clickable for row {row_index}")
                 return False
             except Exception as e:
                 logger.error(f"    💥 Error clicking delete button: {e}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"    💥 Error deleting BullX entry: {e}")
             return False

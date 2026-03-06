@@ -5,7 +5,7 @@
 
 class BullXAPI {
     constructor() {
-        this.baseUrl = 'http://localhost:8000';
+        this.baseUrl = window.location.origin;
         this.apiKey = null;
     }
 
@@ -300,6 +300,96 @@ class BullXAPI {
      */
     async clearAllData() {
         return this.request('DELETE', '/api/v1/clear-all-data');
+    }
+
+    // ---- Queue API Methods ----
+
+    /**
+     * Add a bracket strategy execution to the queue
+     * @param {string} address - Token address
+     * @param {number} totalAmount - Total investment amount
+     * @param {number|null} bracket - Optional bracket override (1-5)
+     * @param {number} priority - Queue priority (default: 0)
+     * @returns {Promise}
+     */
+    async queueBracketStrategy(address, totalAmount, bracket = null, priority = 0) {
+        const data = {
+            address,
+            total_amount: totalAmount,
+            priority
+        };
+        if (bracket !== null) {
+            data.bracket = bracket;
+        }
+        return this.request('POST', '/api/v1/queue/bracket-strategy', data);
+    }
+
+    /**
+     * Get queue items
+     * @param {string|null} status - Optional status filter
+     * @returns {Promise}
+     */
+    async getQueue(status = null) {
+        let endpoint = '/api/v1/queue';
+        if (status) {
+            endpoint += `?status=${status}`;
+        }
+        return this.request('GET', endpoint);
+    }
+
+    /**
+     * Cancel a queued item
+     * @param {number} itemId - Queue item ID
+     * @returns {Promise}
+     */
+    async cancelQueueItem(itemId) {
+        return this.request('DELETE', `/api/v1/queue/${itemId}`);
+    }
+
+    /**
+     * Retry a failed queue item
+     * @param {number} itemId - Queue item ID
+     * @returns {Promise}
+     */
+    async retryQueueItem(itemId) {
+        return this.request('POST', `/api/v1/queue/${itemId}/retry`);
+    }
+
+    /**
+     * Clear completed/failed items from queue
+     * @returns {Promise}
+     */
+    async clearCompletedQueue() {
+        return this.request('DELETE', '/api/v1/queue');
+    }
+
+    // ---- Monitoring API Methods ----
+
+    /**
+     * Get unified monitoring status
+     * @returns {Promise} - Promise that resolves to the monitoring status
+     */
+    async getMonitoringStatus() {
+        return this.request('GET', '/api/v1/monitoring/status');
+    }
+
+    /**
+     * Get recent log entries
+     * @param {number} lines - Number of lines (default 50)
+     * @param {string} level - Filter level: all, error, warning (default all)
+     * @returns {Promise} - Promise that resolves to log entries
+     */
+    async getMonitoringLogs(lines = 50, level = 'all') {
+        const params = new URLSearchParams({ lines, level });
+        return this.request('GET', `/api/v1/monitoring/logs?${params}`);
+    }
+
+    /**
+     * Clear today's log file
+     * @returns {Promise} - Promise that resolves to the clear result
+     */
+    async clearMonitoringLogs() {
+        return this.request('DELETE', '/api/v1/monitoring/logs');
     }
 }
 

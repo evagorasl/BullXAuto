@@ -73,7 +73,17 @@ function setupEventListeners() {
     document.getElementById('get-market-cap-btn').addEventListener('click', handleGetMarketCap);
     document.getElementById('preview-bracket-btn').addEventListener('click', handlePreviewBracket);
     document.getElementById('execute-bracket-btn').addEventListener('click', handleExecuteBracket);
-    
+
+    // Queue event listeners
+    document.getElementById('queue-bracket-btn').addEventListener('click', handleQueueBracket);
+    document.getElementById('refresh-queue-btn').addEventListener('click', loadQueue);
+    document.getElementById('clear-completed-queue-btn').addEventListener('click', handleClearCompletedQueue);
+
+    // Monitoring event listeners
+    document.getElementById('refresh-monitoring-btn').addEventListener('click', loadMonitoring);
+    document.getElementById('monitoring-log-level-filter').addEventListener('change', loadMonitoringLogs);
+    document.getElementById('clear-logs-btn').addEventListener('click', handleClearLogs);
+
     // Clear database event listeners will be set up after login when dashboard is visible
     
     // Modal close button
@@ -128,7 +138,11 @@ async function handleLogin() {
         // Load initial data
         loadOrders();
         loadCoins();
-        
+        loadQueue();
+        startQueueAutoRefresh();
+        loadMonitoring();
+        startMonitoringAutoRefresh();
+
         // Setup clear database event listeners now that dashboard is visible
         setupClearDatabaseEventListeners();
         
@@ -158,15 +172,19 @@ function handleLogout() {
     // Clear API key
     api.clearApiKey();
     localStorage.removeItem('bullx_api_key');
-    
+
+    // Stop auto-refresh intervals
+    stopQueueAutoRefresh();
+    stopMonitoringAutoRefresh();
+
     // Hide dashboard and show login section
     document.getElementById('dashboard').classList.add('hidden');
     document.getElementById('login-section').classList.remove('hidden');
     document.getElementById('profile-info').classList.add('hidden');
-    
+
     // Clear API key input
     document.getElementById('api-key').value = '';
-    
+
     // Clear any messages
     document.getElementById('login-message').textContent = '';
     document.getElementById('login-message').className = 'message';
@@ -1195,7 +1213,7 @@ function showClearMessage(message, type = 'info') {
         messageElement = document.createElement('div');
         messageElement.id = 'clear-message';
         messageElement.className = 'message';
-        
+
         // Insert after the description in the clear database section
         const clearSection = document.querySelector('.card h2 i.fa-trash-alt').parentNode.parentNode;
         const description = clearSection.querySelector('.description');
@@ -1203,15 +1221,525 @@ function showClearMessage(message, type = 'info') {
             description.parentNode.insertBefore(messageElement, description.nextSibling);
         }
     }
-    
+
     messageElement.textContent = message;
     messageElement.className = `message ${type}`;
     messageElement.classList.remove('hidden');
-    
+
     // Auto-hide success messages after 5 seconds
     if (type === 'success') {
         setTimeout(() => {
             messageElement.classList.add('hidden');
         }, 5000);
     }
+}
+
+// ============================================================
+// Queue Management Functions
+// ============================================================
+
+let queueAutoRefreshInterval = null;
+
+/**
+ * Handle adding a bracket strategy to the queue
+ */
+async function handleQueueBracket() {
+    const address = document.getElementById('bracket-address').value.trim();
+    const amount = parseFloat(document.getElementById('bracket-amount').value);
+    const bracketSelect = document.getElementById('bracket-select').value;
+    const bracket = bracketSelect ? parseInt(bracketSelect) : null;
+
+    if (!address) {
+        showBracketMessage('Please enter a token address', 'error');
+        return;
+    }
+
+    if (!amount || amount <= 0) {
+        showBracketMessage('Please enter a valid investment amount', 'error');
+        return;
+    }
+
+    try {
+        const button = document.getElementById('queue-bracket-btn');
+        const originalText = button.innerHTML;
+        button.innerHTML = '<span class="loading-spinner"></span> Queuing...';
+        button.disabled = true;
+
+        const result = await api.queueBracketStrategy(address, amount, bracket);
+
+        if (result.success) {
+            showBracketMessage('Added to queue: ' + address + ' (' + amount + ' SOL)', 'success');
+            loadQueue();
+        }
+
+        button.innerHTML = originalText;
+        button.disabled = false;
+    } catch (error) {
+        showBracketMessage('Failed to add to queue: ' + error.message, 'error');
+        const button = document.getElementById('queue-bracket-btn');
+        button.innerHTML = '<i class="fas fa-list-ol"></i> Add to Queue';
+        button.disabled = false;
+    }
+}
+
+/**
+ * Load and display queue items
+ */
+async function loadQueue() {
+    try {
+        const data = await api.getQueue();
+        const tbody = document.getElementById('queue-body');
+        const noQueueMsg = document.getElementById('no-queue-message');
+
+        if (!data.items || data.items.length === 0) {
+            tbody.innerHTML = '';
+            noQueueMsg.classList.remove('hidden');
+            return;
+        }
+
+        noQueueMsg.classList.add('hidden');
+        tbody.innerHTML = '';
+
+        data.items.forEach(item => {
+            const row = document.createElement('tr');
+            row.innerHTML =
+                '<td>' + item.id + '</td>' +
+                '<td title="' + item.address + '">' + truncateAddress(item.address) + '</td>' +
+                '<td>' + item.total_amount + '</td>' +
+                '<td>' + (item.bracket ? '<span class="bracket-badge bracket-' + item.bracket + '">' + item.bracket + '</span>' : 'Auto') + '</td>' +
+                '<td>' + item.priority + '</td>' +
+                '<td>' + getQueueStatusBadge(item.status) + '</td>' +
+                '<td>' + (item.created_at ? formatDate(item.created_at) : '-') + '</td>' +
+                '<td>' + (item.started_at ? formatDate(item.started_at) : '-') + '</td>' +
+                '<td>' + (item.completed_at ? formatDate(item.completed_at) : '-') + '</td>' +
+                '<td>' + getQueueActionButtons(item) + '</td>';
+
+            if (item.status === 'FAILED' && item.error_message) {
+                row.title = 'Error: ' + item.error_message;
+                row.classList.add('queue-row-failed');
+            }
+            if (item.status === 'IN_PROGRESS') {
+                row.classList.add('queue-row-in-progress');
+            }
+
+            tbody.appendChild(row);
+        });
+
+        // Attach event listeners to action buttons
+        attachQueueActionListeners();
+
+    } catch (error) {
+        console.error('Error loading queue:', error);
+    }
+}
+
+/**
+ * Get status badge HTML for queue status
+ */
+function getQueueStatusBadge(status) {
+    const statusClasses = {
+        'QUEUED': 'queue-status-queued',
+        'IN_PROGRESS': 'queue-status-in-progress',
+        'COMPLETED': 'queue-status-completed',
+        'FAILED': 'queue-status-failed'
+    };
+    const statusIcons = {
+        'QUEUED': 'fa-clock',
+        'IN_PROGRESS': 'fa-spinner fa-spin',
+        'COMPLETED': 'fa-check-circle',
+        'FAILED': 'fa-times-circle'
+    };
+    return '<span class="queue-status ' + (statusClasses[status] || '') + '">' +
+        '<i class="fas ' + (statusIcons[status] || 'fa-question') + '"></i> ' + status +
+    '</span>';
+}
+
+/**
+ * Get action buttons HTML for a queue item
+ */
+function getQueueActionButtons(item) {
+    if (item.status === 'QUEUED') {
+        return '<button class="btn btn-danger btn-small queue-cancel-btn" data-id="' + item.id + '">' +
+            '<i class="fas fa-times"></i> Cancel</button>';
+    }
+    if (item.status === 'FAILED') {
+        return '<button class="btn btn-warning btn-small queue-retry-btn" data-id="' + item.id + '">' +
+            '<i class="fas fa-redo"></i> Retry</button>';
+    }
+    if (item.status === 'IN_PROGRESS') {
+        return '<span class="loading-spinner"></span> Running...';
+    }
+    // COMPLETED
+    return '<span class="queue-status-done"><i class="fas fa-check"></i></span>';
+}
+
+/**
+ * Attach click listeners to dynamically created queue action buttons
+ */
+function attachQueueActionListeners() {
+    document.querySelectorAll('.queue-cancel-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            if (confirm('Cancel queue item #' + id + '?')) {
+                try {
+                    await api.cancelQueueItem(id);
+                    loadQueue();
+                } catch (error) {
+                    alert('Failed to cancel: ' + error.message);
+                }
+            }
+        });
+    });
+
+    document.querySelectorAll('.queue-retry-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            try {
+                await api.retryQueueItem(id);
+                loadQueue();
+            } catch (error) {
+                alert('Failed to retry: ' + error.message);
+            }
+        });
+    });
+}
+
+/**
+ * Handle clearing completed queue items
+ */
+async function handleClearCompletedQueue() {
+    try {
+        const result = await api.clearCompletedQueue();
+        if (result.success) {
+            const queueMsg = document.getElementById('queue-message');
+            queueMsg.textContent = 'Cleared ' + result.items_cleared + ' items';
+            queueMsg.className = 'message success';
+            queueMsg.classList.remove('hidden');
+            setTimeout(() => { queueMsg.classList.add('hidden'); }, 3000);
+            loadQueue();
+        }
+    } catch (error) {
+        const queueMsg = document.getElementById('queue-message');
+        queueMsg.textContent = 'Error: ' + error.message;
+        queueMsg.className = 'message error';
+        queueMsg.classList.remove('hidden');
+    }
+}
+
+/**
+ * Start auto-refreshing the queue every 5 seconds
+ */
+function startQueueAutoRefresh() {
+    if (queueAutoRefreshInterval) return;
+    queueAutoRefreshInterval = setInterval(loadQueue, 5000);
+    const statusEl = document.getElementById('queue-refresh-status');
+    if (statusEl) statusEl.textContent = 'ON';
+}
+
+/**
+ * Stop auto-refreshing the queue
+ */
+function stopQueueAutoRefresh() {
+    if (queueAutoRefreshInterval) {
+        clearInterval(queueAutoRefreshInterval);
+        queueAutoRefreshInterval = null;
+    }
+    const statusEl = document.getElementById('queue-refresh-status');
+    if (statusEl) statusEl.textContent = 'OFF';
+}
+
+
+// ============================================================
+// System Monitoring Functions
+// ============================================================
+
+let monitoringAutoRefreshInterval = null;
+
+/**
+ * Load and display monitoring status
+ */
+async function loadMonitoring() {
+    try {
+        const data = await api.getMonitoringStatus();
+
+        if (!data.success) {
+            showMessage('monitoring-message', 'Failed to load monitoring data', 'error');
+            return;
+        }
+
+        renderSystemInfo(data.system);
+        renderOrderMonitor(data.order_monitor);
+        renderQueueProcessor(data.queue_processor);
+        renderActivityTimeline(data.recent_activity);
+        renderLogs(data.recent_logs);
+
+    } catch (error) {
+        console.error('Error loading monitoring:', error);
+    }
+}
+
+/**
+ * Render system info section
+ */
+function renderSystemInfo(system) {
+    if (!system) return;
+
+    document.getElementById('monitoring-uptime').textContent = formatUptime(system.uptime_seconds);
+    document.getElementById('monitoring-environment').textContent = system.environment || '--';
+    document.getElementById('monitoring-log-file').textContent = system.log_file || '--';
+}
+
+/**
+ * Format uptime seconds into human-readable string
+ */
+function formatUptime(seconds) {
+    if (!seconds || seconds <= 0) return '--';
+    const days = Math.floor(seconds / 86400);
+    const hrs = Math.floor((seconds % 86400) / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    if (days > 0) return `${days}d ${hrs}h ${mins}m`;
+    if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+    if (mins > 0) return `${mins}m ${secs}s`;
+    return `${secs}s`;
+}
+
+/**
+ * Render order monitor section
+ */
+function renderOrderMonitor(orderMonitor) {
+    const container = document.getElementById('monitoring-order-monitor');
+    if (!orderMonitor) {
+        container.innerHTML = '<p class="monitoring-placeholder">No data</p>';
+        return;
+    }
+
+    let html = '<div class="monitoring-stat">' +
+        '<span class="monitoring-label">Scheduler:</span>' +
+        '<span class="monitoring-value">' + getStatusDot(orderMonitor.scheduler_running) +
+        (orderMonitor.scheduler_running ? ' Running' : ' Stopped') + '</span>' +
+        '</div>';
+
+    const profiles = orderMonitor.profiles || {};
+    if (Object.keys(profiles).length === 0) {
+        html += '<p class="monitoring-placeholder">No profiles monitored</p>';
+    } else {
+        for (const [name, info] of Object.entries(profiles)) {
+            html += '<div class="monitoring-profile">' +
+                '<div class="monitoring-stat">' +
+                '<span class="monitoring-label">' + getStatusDot(info.is_healthy) + ' ' + name + '</span>' +
+                '<span class="monitoring-value">' + (info.active_orders || 0) + ' orders</span>' +
+                '</div>' +
+                '<div class="monitoring-stat-small">' +
+                'Last: ' + (info.last_successful_run ? formatTimeAgo(info.time_since_last_success_seconds) : 'Never') +
+                ' &middot; <span class="text-success">' + (info.recent_successful_tasks || 0) + ' ok</span>' +
+                ' &middot; <span class="text-danger">' + (info.recent_failed_tasks || 0) + ' fail</span>' +
+                ' &middot; <span class="text-warning">' + (info.recent_missed_tasks || 0) + ' missed</span>' +
+                '</div>' +
+                '</div>';
+        }
+    }
+
+    container.innerHTML = html;
+}
+
+/**
+ * Render queue processor section
+ */
+function renderQueueProcessor(queueData) {
+    const container = document.getElementById('monitoring-queue-processor');
+    if (!queueData) {
+        container.innerHTML = '<p class="monitoring-placeholder">No data</p>';
+        return;
+    }
+
+    let html = '<div class="monitoring-stat">' +
+        '<span class="monitoring-label">Status:</span>' +
+        '<span class="monitoring-value">' + getStatusDot(queueData.is_running) +
+        (queueData.is_running ? ' Running' : ' Stopped') + '</span>' +
+        '</div>';
+
+    html += '<div class="monitoring-stat">' +
+        '<span class="monitoring-label">Queued / In Progress:</span>' +
+        '<span class="monitoring-value">' + (queueData.queued_items || 0) + ' / ' + (queueData.in_progress_items || 0) + '</span>' +
+        '</div>';
+
+    html += '<div class="monitoring-stat">' +
+        '<span class="monitoring-label">Today:</span>' +
+        '<span class="monitoring-value">' +
+        '<span class="text-success">' + (queueData.completed_items_today || 0) + ' completed</span>' +
+        ' &middot; <span class="text-danger">' + (queueData.failed_items_today || 0) + ' failed</span>' +
+        '</span></div>';
+
+    const processingProfiles = queueData.processing_profiles || {};
+    for (const [name, isProcessing] of Object.entries(processingProfiles)) {
+        html += '<div class="monitoring-stat">' +
+            '<span class="monitoring-label">' + name + ':</span>' +
+            '<span class="monitoring-value">' + (isProcessing ?
+                '<i class="fas fa-spinner fa-spin"></i> Processing' :
+                'Idle') + '</span></div>';
+    }
+
+    container.innerHTML = html;
+}
+
+/**
+ * Render activity timeline
+ */
+function renderActivityTimeline(activities) {
+    const container = document.getElementById('monitoring-activity-timeline');
+
+    if (!activities || activities.length === 0) {
+        container.innerHTML = '<p class="monitoring-placeholder">No recent activity</p>';
+        return;
+    }
+
+    let html = '';
+    activities.forEach(item => {
+        let icon, colorClass, description;
+
+        if (item.type === 'order_check') {
+            icon = 'fa-search';
+            colorClass = item.success ? 'timeline-success' : 'timeline-error';
+            description = 'Order check for ' + item.profile +
+                (item.success ? ' (' + (item.orders_processed || 0) + ' processed)' :
+                ' - FAILED' + (item.error ? ': ' + item.error.substring(0, 60) : ''));
+        } else {
+            icon = 'fa-play-circle';
+            colorClass = item.status === 'COMPLETED' ? 'timeline-success' : 'timeline-error';
+            const addr = item.address ? truncateAddress(item.address) : '';
+            description = 'Queue: ' + addr +
+                ' - ' + (item.status || 'UNKNOWN') +
+                (item.error ? ': ' + item.error.substring(0, 60) : '');
+        }
+
+        html += '<div class="timeline-item ' + colorClass + '">' +
+            '<div class="timeline-icon"><i class="fas ' + icon + '"></i></div>' +
+            '<div class="timeline-content">' +
+            '<span class="timeline-time">' + (item.time ? formatDate(item.time) : '--') + '</span>' +
+            '<span class="timeline-desc">' + description + '</span>' +
+            '</div></div>';
+    });
+
+    container.innerHTML = html;
+}
+
+/**
+ * Render log entries
+ */
+function renderLogs(logs) {
+    const container = document.getElementById('monitoring-logs-panel');
+
+    if (!logs || logs.length === 0) {
+        container.innerHTML = '<p class="monitoring-placeholder">No log entries found</p>';
+        return;
+    }
+
+    let html = '';
+    logs.forEach(entry => {
+        const levelClass = 'log-' + (entry.level || 'info').toLowerCase();
+        html += '<div class="log-entry ' + levelClass + '">' +
+            '<span class="log-time">' + (entry.time || '') + '</span>' +
+            '<span class="log-level">' + (entry.level || '') + '</span>' +
+            '<span class="log-logger">' + (entry.logger || '') + '</span>' +
+            '<span class="log-message">' + (entry.message || '') + '</span>' +
+            '</div>';
+    });
+
+    container.innerHTML = html;
+}
+
+/**
+ * Load monitoring logs separately (when filter changes)
+ */
+async function loadMonitoringLogs() {
+    try {
+        const level = document.getElementById('monitoring-log-level-filter').value;
+        const data = await api.getMonitoringLogs(50, level);
+        if (data.success) {
+            renderLogs(data.entries);
+        }
+    } catch (error) {
+        console.error('Error loading monitoring logs:', error);
+    }
+}
+
+/**
+ * Handle clear logs button click
+ */
+async function handleClearLogs() {
+    if (!confirm('Are you sure you want to clear today\'s log file? This cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const button = document.getElementById('clear-logs-btn');
+        const originalText = button.innerHTML;
+        button.innerHTML = '<span class="loading-spinner"></span> Clearing...';
+        button.disabled = true;
+
+        const result = await api.clearMonitoringLogs();
+
+        if (result.success) {
+            // Re-render logs (now empty)
+            renderLogs([]);
+            // Show brief success in the monitoring message area
+            const msgEl = document.getElementById('monitoring-message');
+            msgEl.textContent = result.message;
+            msgEl.className = 'message success';
+            msgEl.classList.remove('hidden');
+            setTimeout(() => { msgEl.classList.add('hidden'); }, 4000);
+        }
+
+        button.innerHTML = originalText;
+        button.disabled = false;
+    } catch (error) {
+        console.error('Error clearing logs:', error);
+        const button = document.getElementById('clear-logs-btn');
+        button.innerHTML = '<i class="fas fa-trash"></i> Clear Logs';
+        button.disabled = false;
+        alert('Failed to clear logs: ' + error.message);
+    }
+}
+
+/**
+ * Get a colored status dot HTML
+ */
+function getStatusDot(isHealthy) {
+    if (isHealthy === true) return '<span class="status-dot status-dot-green"></span>';
+    if (isHealthy === false) return '<span class="status-dot status-dot-red"></span>';
+    return '<span class="status-dot status-dot-yellow"></span>';
+}
+
+/**
+ * Format seconds into "X ago" string
+ */
+function formatTimeAgo(seconds) {
+    if (seconds === null || seconds === undefined) return 'Unknown';
+    if (seconds < 60) return Math.round(seconds) + 's ago';
+    if (seconds < 3600) return Math.round(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.round(seconds / 3600) + 'h ago';
+    return Math.round(seconds / 86400) + 'd ago';
+}
+
+/**
+ * Start auto-refreshing monitoring every 30 seconds
+ */
+function startMonitoringAutoRefresh() {
+    if (monitoringAutoRefreshInterval) return;
+    monitoringAutoRefreshInterval = setInterval(loadMonitoring, 30000);
+    const statusEl = document.getElementById('monitoring-refresh-status');
+    if (statusEl) statusEl.textContent = 'ON';
+}
+
+/**
+ * Stop auto-refreshing monitoring
+ */
+function stopMonitoringAutoRefresh() {
+    if (monitoringAutoRefreshInterval) {
+        clearInterval(monitoringAutoRefreshInterval);
+        monitoringAutoRefreshInterval = null;
+    }
+    const statusEl = document.getElementById('monitoring-refresh-status');
+    if (statusEl) statusEl.textContent = 'OFF';
 }

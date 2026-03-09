@@ -27,6 +27,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress noisy APScheduler "Running job / executed successfully" logs
+logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
+
 # Import our modules AFTER logging configuration
 from database import create_tables, init_profiles, db_manager
 from chrome_driver import chrome_driver_manager

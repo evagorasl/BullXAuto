@@ -1067,6 +1067,23 @@ class EnhancedOrderProcessor:
                         'bracket_entries': bracket_entries
                     }
 
+                # METHOD 1b: TP-condition trigger match
+                # When TP hits, BullX changes trigger from "1 TP, 1 SL" → "1 SL"
+                # Match a BullX "1 SL" row to a DB order stored as "1 TP, 1 SL"
+                if db_order.trigger_condition:
+                    bullx_type = self._check_trigger_condition_type(trigger_condition)
+                    db_type = self._check_trigger_condition_type(db_order.trigger_condition)
+                    if bullx_type['has_sl_only'] and db_type['has_both']:
+                        logger.debug(f"     Strong match (TP-hit): Row '1 SL' → Order {db_order.id} (bracket {db_order.bracket_id}) stored as '1 TP, 1 SL'")
+                        return {
+                            'status': 'success',
+                            'order': db_order,
+                            'bracket_id': db_order.bracket_id,
+                            'method': 'trigger_condition_exact',
+                            'coin': coin,
+                            'bracket_entries': bracket_entries
+                        }
+
                 # METHOD 2: Entry price match
                 if entry_price:
                     expected_entry = bracket_entries[db_order.bracket_id - 1]

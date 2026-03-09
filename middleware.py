@@ -23,7 +23,7 @@ class CloseDriverMiddleware(BaseHTTPMiddleware):
         
         if profile_name:
             path = request.url.path
-            logger.info(f"Closing Chrome driver for profile {profile_name} after request to {path}")
+            logger.debug(f"Closing Chrome driver for profile {profile_name} after request to {path}")
             try:
                 chrome_driver_manager.close_driver(profile_name)
             except Exception as e:

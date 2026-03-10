@@ -84,6 +84,12 @@ function setupEventListeners() {
     document.getElementById('monitoring-log-level-filter').addEventListener('change', loadMonitoringLogs);
     document.getElementById('clear-logs-btn').addEventListener('click', handleClearLogs);
 
+    // Daily Report event listeners
+    document.getElementById('refresh-reports-btn').addEventListener('click', loadReportList);
+    document.getElementById('generate-report-btn').addEventListener('click', handleGenerateReport);
+    document.getElementById('report-date-select').addEventListener('change', handleReportDateChange);
+    document.getElementById('toggle-critical-msgs').addEventListener('click', toggleCriticalMessages);
+
     // Clear database event listeners will be set up after login when dashboard is visible
     
     // Modal close button
@@ -142,6 +148,7 @@ async function handleLogin() {
         startQueueAutoRefresh();
         loadMonitoring();
         startMonitoringAutoRefresh();
+        loadReportList();
 
         // Setup clear database event listeners now that dashboard is visible
         setupClearDatabaseEventListeners();
@@ -1742,4 +1749,248 @@ function stopMonitoringAutoRefresh() {
     }
     const statusEl = document.getElementById('monitoring-refresh-status');
     if (statusEl) statusEl.textContent = 'OFF';
+}
+
+
+// ==========================================
+// Daily Health Report Functions
+// ==========================================
+
+/**
+ * Load list of available reports and populate the date selector
+ */
+async function loadReportList() {
+    try {
+        const data = await api.getHealthReports(30);
+        if (!data.success) return;
+
+        const select = document.getElementById('report-date-select');
+        select.innerHTML = '<option value="">-- Select report date --</option>';
+
+        data.reports.forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = r.date;
+            const statusEmoji = r.status === 'HEALTHY' ? '\u2705' :
+                                r.status === 'WARNING' ? '\u26A0\uFE0F' : '\uD83D\uDEA8';
+            opt.textContent = `${statusEmoji} ${r.date} (${r.status})`;
+            select.appendChild(opt);
+        });
+
+        // Auto-load the most recent report if available
+        if (data.reports.length > 0) {
+            select.value = data.reports[0].date;
+            loadReport(data.reports[0].date);
+        }
+    } catch (error) {
+        console.error('Error loading report list:', error);
+    }
+}
+
+/**
+ * Handle report date selection change
+ */
+function handleReportDateChange() {
+    const dateStr = document.getElementById('report-date-select').value;
+    if (dateStr) {
+        loadReport(dateStr);
+    }
+}
+
+/**
+ * Load and render a specific report
+ */
+async function loadReport(dateStr) {
+    try {
+        const data = await api.getHealthReport(dateStr);
+        if (!data.success) {
+            showMessage('report-message', 'Failed to load report', 'error');
+            return;
+        }
+        renderReport(data.report);
+    } catch (error) {
+        console.error('Error loading report:', error);
+        showMessage('report-message', `No report found for ${dateStr}`, 'warning');
+        // Hide report sections
+        document.getElementById('report-summary-banner').classList.add('hidden');
+        document.getElementById('report-detail').classList.add('hidden');
+    }
+}
+
+/**
+ * Render a full health report
+ */
+function renderReport(report) {
+    // Hide any message
+    document.getElementById('report-message').classList.add('hidden');
+
+    // Show the detail sections
+    document.getElementById('report-summary-banner').classList.remove('hidden');
+    document.getElementById('report-detail').classList.remove('hidden');
+
+    // Status banner
+    const statusText = document.getElementById('report-status-text');
+    statusText.textContent = report.overall_status;
+    const banner = document.getElementById('report-summary-banner');
+    banner.className = 'report-banner report-banner-' + report.overall_status.toLowerCase();
+
+    document.getElementById('report-date-display').textContent = 'Report date: ' + report.report_date;
+    document.getElementById('report-generated-at').textContent =
+        'Generated: ' + (report.generated_at ? formatDate(report.generated_at) : '--');
+
+    // Render each card
+    renderReportLogAnalysis(report.log_analysis, report.summary);
+    renderReportOrderProcessing(report.order_processing);
+    renderReportSafetyEvents(report.safety_events, report.database_events);
+    renderReportSystemState(report.current_system_state);
+    renderReportCriticalMessages(report.critical_messages);
+}
+
+function renderReportLogAnalysis(logAnalysis, summary) {
+    const container = document.getElementById('report-log-analysis');
+    const lc = logAnalysis.level_counts || {};
+    container.innerHTML =
+        '<div class="monitoring-stat"><span class="monitoring-label">Total Lines:</span>' +
+        '<span class="monitoring-value">' + (summary.total_log_lines || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Log Period:</span>' +
+        '<span class="monitoring-value">' + (summary.first_log_entry || '--') + ' \u2192 ' + (summary.last_log_entry || '--') + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Errors:</span>' +
+        '<span class="monitoring-value text-danger">' + (logAnalysis.error_count || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Warnings:</span>' +
+        '<span class="monitoring-value text-warning">' + (logAnalysis.warning_count || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Critical:</span>' +
+        '<span class="monitoring-value text-danger">' + (logAnalysis.critical_count || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Info:</span>' +
+        '<span class="monitoring-value">' + (lc.INFO || 0) + '</span></div>';
+}
+
+function renderReportOrderProcessing(op) {
+    const container = document.getElementById('report-order-processing');
+    container.innerHTML =
+        '<div class="monitoring-stat"><span class="monitoring-label">Checks Started:</span>' +
+        '<span class="monitoring-value">' + (op.total_checks_started || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Completed:</span>' +
+        '<span class="monitoring-value text-success">' + (op.successful_completions || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Failed:</span>' +
+        '<span class="monitoring-value text-danger">' + (op.failed_processing || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">TP Hits:</span>' +
+        '<span class="monitoring-value text-success">' + (op.tp_hits_detected || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Renewal Batches:</span>' +
+        '<span class="monitoring-value">' + (op.renewal_batches || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Deletion Failures:</span>' +
+        '<span class="monitoring-value text-danger">' + (op.deletion_failures || 0) + '</span></div>';
+}
+
+function renderReportSafetyEvents(safety, dbEvents) {
+    const container = document.getElementById('report-safety-events');
+    const hasAny = Object.values(safety).some(v => v > 0) ||
+                   Object.values(dbEvents).some(v => v > 0);
+
+    if (!hasAny) {
+        container.innerHTML = '<p class="monitoring-placeholder" style="color: var(--success-color);">' +
+            '<i class="fas fa-check-circle"></i> No safety events detected</p>';
+        return;
+    }
+
+    container.innerHTML =
+        '<div class="monitoring-stat"><span class="monitoring-label">Wrong Coin Blocks:</span>' +
+        '<span class="monitoring-value text-danger">' + (safety.wrong_coin_blocks || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Orphaned Orders:</span>' +
+        '<span class="monitoring-value text-warning">' + (safety.orphaned_orders_detected || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Reconciliations:</span>' +
+        '<span class="monitoring-value text-warning">' + (safety.reconciliation_actions || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Missing Orders:</span>' +
+        '<span class="monitoring-value text-danger">' + (safety.missing_orders_detected || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Missed Intervals:</span>' +
+        '<span class="monitoring-value text-warning">' + (safety.missed_task_intervals || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">TX Rollbacks:</span>' +
+        '<span class="monitoring-value text-danger">' + (dbEvents.transaction_rollbacks || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Stale Order Warnings:</span>' +
+        '<span class="monitoring-value text-warning">' + (dbEvents.stale_orders_warnings || 0) + '</span></div>';
+}
+
+function renderReportSystemState(state) {
+    const container = document.getElementById('report-system-state');
+    if (!state) {
+        container.innerHTML = '<p class="monitoring-placeholder">No state data</p>';
+        return;
+    }
+
+    let html =
+        '<div class="monitoring-stat"><span class="monitoring-label">Uptime:</span>' +
+        '<span class="monitoring-value">' + formatUptime(state.uptime_seconds) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Scheduler:</span>' +
+        '<span class="monitoring-value">' + getStatusDot(state.scheduler_running) +
+        (state.scheduler_running ? ' Running' : ' Stopped') + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Queue:</span>' +
+        '<span class="monitoring-value">' + getStatusDot(state.queue_running) +
+        (state.queue_running ? ' Running' : ' Stopped') +
+        ' (' + (state.queued_items || 0) + ' queued)</span></div>';
+
+    const profiles = state.profiles || {};
+    for (const [name, info] of Object.entries(profiles)) {
+        html += '<div class="monitoring-stat"><span class="monitoring-label">' +
+            getStatusDot(info.is_healthy) + ' ' + name + ':</span>' +
+            '<span class="monitoring-value">' + (info.active_orders || 0) + ' orders</span></div>';
+    }
+
+    container.innerHTML = html;
+}
+
+function renderReportCriticalMessages(messages) {
+    const container = document.getElementById('report-critical-messages');
+    if (!messages || messages.length === 0) {
+        container.innerHTML = '<p class="monitoring-placeholder" style="color: var(--success-color);">' +
+            '<i class="fas fa-check-circle"></i> No critical messages - all clear</p>';
+        return;
+    }
+
+    let html = '';
+    messages.forEach(entry => {
+        const levelClass = 'log-' + (entry.level || 'error').toLowerCase();
+        html += '<div class="log-entry ' + levelClass + '">' +
+            '<span class="log-time">' + (entry.time || '') + '</span>' +
+            '<span class="log-level">' + (entry.level || '') + '</span>' +
+            '<span class="log-logger">' + (entry.logger || '') + '</span>' +
+            '<span class="log-message">' + (entry.message || '') + '</span>' +
+            '</div>';
+    });
+    container.innerHTML = html;
+}
+
+function toggleCriticalMessages() {
+    const panel = document.getElementById('report-critical-messages');
+    const btn = document.getElementById('toggle-critical-msgs');
+    if (panel.classList.contains('hidden')) {
+        panel.classList.remove('hidden');
+        btn.innerHTML = '<i class="fas fa-chevron-up"></i> Hide';
+    } else {
+        panel.classList.add('hidden');
+        btn.innerHTML = '<i class="fas fa-chevron-down"></i> Show';
+    }
+}
+
+async function handleGenerateReport() {
+    const btn = document.getElementById('generate-report-btn');
+    const originalHTML = btn.innerHTML;
+    btn.innerHTML = '<span class="loading-spinner"></span> Generating...';
+    btn.disabled = true;
+
+    try {
+        const result = await api.generateHealthReport();
+        if (result.success) {
+            renderReport(result.report);
+            // Refresh the report list to include the new one
+            await loadReportList();
+            showMessage('report-message', 'Report generated successfully', 'success');
+            setTimeout(() => {
+                document.getElementById('report-message').classList.add('hidden');
+            }, 4000);
+        }
+    } catch (error) {
+        console.error('Error generating report:', error);
+        showMessage('report-message', 'Failed to generate report: ' + error.message, 'error');
+    }
+
+    btn.innerHTML = originalHTML;
+    btn.disabled = false;
 }

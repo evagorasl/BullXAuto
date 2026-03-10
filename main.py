@@ -99,6 +99,26 @@ async def lifespan(app: FastAPI):
     # Start queue processor
     await queue_processor.start()
 
+    # Schedule daily health check at configured time (default 7:00 AM)
+    from daily_health_check import run_daily_health_check
+    from apscheduler.triggers.cron import CronTrigger
+
+    # Ensure scheduler is running (may not be if no active profiles)
+    if not enhanced_order_monitor.scheduler.running:
+        enhanced_order_monitor.scheduler.start()
+        enhanced_order_monitor.is_running = True
+
+    enhanced_order_monitor.scheduler.add_job(
+        run_daily_health_check,
+        trigger=CronTrigger(hour=config.HEALTH_CHECK_HOUR, minute=config.HEALTH_CHECK_MINUTE),
+        id='daily_health_check',
+        name='Daily Health Check (7:00 AM)',
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600  # If server was down at 7am, run when it comes back within 1hr
+    )
+    logger.info(f"Daily health check scheduled at {config.HEALTH_CHECK_HOUR:02d}:{config.HEALTH_CHECK_MINUTE:02d}")
+
     logger.info("BullX Automation API started successfully")
     
     yield

@@ -62,6 +62,11 @@ class Config:
 
     # Application start time (set by main.py at startup)
     APP_START_TIME = None
+
+    # Daily health check reports
+    REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "reports")
+    HEALTH_CHECK_HOUR = 7   # Hour to run the daily check (24h format)
+    HEALTH_CHECK_MINUTE = 0  # Minute to run the daily check
     
     # Default strategy parameters
     DEFAULT_STRATEGIES = {
@@ -115,7 +120,7 @@ class Config:
 # Environment-specific configurations
 class DevelopmentConfig(Config):
     DEBUG = True
-    API_RELOAD = True
+    API_RELOAD = False  # Disabled: reload causes route registration issues with newer modules
 
 class ProductionConfig(Config):
     DEBUG = False

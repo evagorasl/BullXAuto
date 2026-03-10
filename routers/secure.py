@@ -24,6 +24,7 @@ from background_task_monitor import (
     start_background_tasks_for_profile, stop_background_tasks_for_profile,
     enhanced_order_monitor, queue_processor
 )
+from daily_health_check import daily_health_checker
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1462,4 +1463,80 @@ async def clear_monitoring_logs(
 
     except Exception as e:
         logger.error(f"Error clearing logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# Daily Health Report Endpoints
+# ==========================================
+
+@router.get("/monitoring/reports")
+async def list_health_reports(
+    limit: int = Query(30, description="Maximum number of reports to list", ge=1, le=365),
+    current_profile: Profile = Depends(get_current_profile),
+):
+    """List available daily health reports (newest first)"""
+    try:
+        reports = daily_health_checker.list_reports(limit=limit)
+        return {
+            "success": True,
+            "total": len(reports),
+            "reports": reports,
+        }
+    except Exception as e:
+        logger.error(f"Error listing health reports: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/monitoring/reports/{date_str}")
+async def get_health_report(
+    date_str: str,
+    current_profile: Profile = Depends(get_current_profile),
+):
+    """Get a specific daily health report by date (format: YYYY-MM-DD)"""
+    try:
+        # Validate date format
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+        report = daily_health_checker.get_report(date_str)
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"No report found for {date_str}")
+
+        return {
+            "success": True,
+            "report": report,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting health report for {date_str}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/monitoring/reports/generate")
+async def generate_health_report(
+    date_str: Optional[str] = Query(None, description="Date to analyze (YYYY-MM-DD). Defaults to yesterday."),
+    current_profile: Profile = Depends(get_current_profile),
+):
+    """Manually trigger generation of a health report for a specific date"""
+    try:
+        target_date = None
+        if date_str:
+            try:
+                target_date = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+        report = await daily_health_checker.generate_report(target_date=target_date)
+        return {
+            "success": True,
+            "report": report,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating health report: {e}")
         raise HTTPException(status_code=500, detail=str(e))

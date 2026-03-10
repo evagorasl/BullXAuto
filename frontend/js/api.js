@@ -391,6 +391,39 @@ class BullXAPI {
     async clearMonitoringLogs() {
         return this.request('DELETE', '/api/v1/monitoring/logs');
     }
+
+    // ---- Daily Report API Methods ----
+
+    /**
+     * Get list of available daily health reports
+     * @param {number} limit - Maximum reports to return (default 30)
+     * @returns {Promise}
+     */
+    async getHealthReports(limit = 30) {
+        return this.request('GET', `/api/v1/monitoring/reports?limit=${limit}`);
+    }
+
+    /**
+     * Get a specific daily health report by date
+     * @param {string} dateStr - Date in YYYY-MM-DD format
+     * @returns {Promise}
+     */
+    async getHealthReport(dateStr) {
+        return this.request('GET', `/api/v1/monitoring/reports/${dateStr}`);
+    }
+
+    /**
+     * Manually trigger health report generation
+     * @param {string|null} dateStr - Optional date (YYYY-MM-DD), defaults to yesterday
+     * @returns {Promise}
+     */
+    async generateHealthReport(dateStr = null) {
+        let endpoint = '/api/v1/monitoring/reports/generate';
+        if (dateStr) {
+            endpoint += `?date_str=${dateStr}`;
+        }
+        return this.request('POST', endpoint);
+    }
 }
 
 // Create a global API client instance

@@ -676,6 +676,76 @@ class EnhancedOrderProcessor:
             logger.error(f"    💥 Error in click_coin_filter_button: {e}")
             return False
     
+    async def _verify_filter_applied(self, profile_name: str, expected_coin_address: str, expected_coin_name: str, expected_row_count: int = None) -> bool:
+        """
+        CRITICAL SAFETY CHECK: Verify that the filter is correctly applied by checking
+        that ALL visible rows belong to the expected coin. This prevents Cancel All
+        or bulk delete from affecting orders for other coins if the filter didn't apply.
+
+        Args:
+            profile_name: Chrome profile name
+            expected_coin_address: The coin address that all visible rows should belong to
+            expected_coin_name: Human-readable coin name for logging
+            expected_row_count: Optional expected number of rows (logs warning if mismatch)
+
+        Returns:
+            True if all visible rows belong to the expected coin, False otherwise
+        """
+        try:
+            driver = self.driver_manager.get_driver(profile_name)
+
+            # Find the order container
+            container_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[2]/div/div/div/div[1]"
+
+            try:
+                container = driver.find_element(By.XPATH, container_xpath)
+                order_rows = container.find_elements(By.TAG_NAME, "a")
+            except NoSuchElementException:
+                logger.error(f"      ❌ Filter verification failed: No order container found")
+                return False
+
+            if not order_rows:
+                logger.error(f"      ❌ Filter verification failed: No visible rows found")
+                return False
+
+            row_count = len(order_rows)
+
+            # Check each row's coin address
+            for i, row in enumerate(order_rows, 1):
+                try:
+                    href = row.get_attribute("href")
+                    if not href:
+                        logger.error(f"      ❌ Filter verification failed: Row {i} has no href")
+                        return False
+
+                    # Extract coin address from href
+                    if 'address=' in href:
+                        row_coin_address = href.split('address=')[-1].split('&')[0]
+                    else:
+                        row_coin_address = href.split('/')[-1] if '/' in href else href
+
+                    if row_coin_address.lower() != expected_coin_address.lower():
+                        logger.error(f"      ❌ FILTER VERIFICATION FAILED: Row {i} belongs to DIFFERENT coin!")
+                        logger.error(f"         Expected: {expected_coin_address} ({expected_coin_name})")
+                        logger.error(f"         Found:    {row_coin_address}")
+                        logger.error(f"         🚨 Filter is NOT correctly applied - BLOCKING destructive action!")
+                        return False
+
+                except Exception as e:
+                    logger.error(f"      ❌ Filter verification failed: Error reading row {i}: {e}")
+                    return False
+
+            # Optional: check row count
+            if expected_row_count is not None and row_count != expected_row_count:
+                logger.warning(f"      ⚠️  Filter verified but row count mismatch: expected {expected_row_count}, found {row_count}")
+
+            logger.info(f"      ✅ Filter verified: all {row_count} visible rows belong to {expected_coin_name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"      💥 Error in filter verification: {e}")
+            return False
+
     async def _count_bullx_orders_for_coin(self, profile_name: str, button_index: int) -> int:
         """
         Count the number of visible orders on BullX for a specific coin.
@@ -2609,7 +2679,12 @@ class EnhancedOrderProcessor:
                     
                     # Step 1: Cancel all orders for this coin
                     logger.info(f"   📋 Step 1: Cancelling all orders...")
-                    cancel_success = await self._cancel_all_orders_for_coin(profile_name, button_index)
+                    cancel_success = await self._cancel_all_orders_for_coin(
+                        profile_name, button_index,
+                        coin_address=coin.address,
+                        coin_name=coin.name or coin.address,
+                        expected_order_count=len(coin_orders)
+                    )
                     
                     if cancel_success:
                         coin_detail['orders_cancelled'] = len(coin_orders)
@@ -2621,7 +2696,11 @@ class EnhancedOrderProcessor:
                     
                     # Step 1.5: Delete all BullX entries for this coin
                     logger.info(f"   🗑️  Deleting all BullX entries...")
-                    delete_success = await self._delete_all_bullx_entries_for_coin(profile_name, button_index)
+                    delete_success = await self._delete_all_bullx_entries_for_coin(
+                        profile_name, button_index,
+                        coin_address=coin.address,
+                        coin_name=coin.name or coin.address
+                    )
                     
                     if delete_success:
                         logger.info(f"   ✅ Successfully deleted all BullX entries")
@@ -2671,30 +2750,61 @@ class EnhancedOrderProcessor:
             logger.error(f"💥 Error processing expired coins: {e}")
             return {"coins_processed": 0, "expired_details": [], "error": str(e)}
     
-    async def _cancel_all_orders_for_coin(self, profile_name: str, button_index: int) -> bool:
+    async def _cancel_all_orders_for_coin(self, profile_name: str, button_index: int,
+                                           coin_address: str = None, coin_name: str = None,
+                                           expected_order_count: int = None) -> bool:
         """
         Cancel all orders for a specific coin using the Cancel All button.
-        
+        CRITICAL: Verifies filter is correctly applied before clicking Cancel All
+        to prevent accidentally cancelling orders for other coins.
+
         Args:
             profile_name: Chrome profile name
             button_index: Filter button index for the coin
-            
+            coin_address: Expected coin address for filter verification
+            coin_name: Expected coin name for logging
+            expected_order_count: Expected number of orders for this coin
+
         Returns:
             True if successful, False otherwise
         """
         try:
             driver = self.driver_manager.get_driver(profile_name)
-            
+
             # Re-click filter button to ensure correct view
             filter_success = await self._click_coin_filter_button(profile_name, button_index)
             if not filter_success:
                 logger.error(f"      ❌ Failed to click filter button")
                 return False
-            
+
+            # CRITICAL SAFETY CHECK: Verify filter shows only the target coin
+            if coin_address:
+                verified = await self._verify_filter_applied(
+                    profile_name,
+                    expected_coin_address=coin_address,
+                    expected_coin_name=coin_name or coin_address,
+                    expected_row_count=expected_order_count
+                )
+                if not verified:
+                    # Retry with force click
+                    logger.warning(f"      ⚠️  Filter verification failed, retrying with force click...")
+                    filter_success = await self._click_coin_filter_button(profile_name, button_index, force=True)
+                    time.sleep(1)
+                    verified = await self._verify_filter_applied(
+                        profile_name,
+                        expected_coin_address=coin_address,
+                        expected_coin_name=coin_name or coin_address,
+                        expected_row_count=expected_order_count
+                    )
+                    if not verified:
+                        logger.error(f"      ❌ CANCEL ALL BLOCKED: Filter verification failed after retry!")
+                        logger.error(f"      🛡️  This prevented cancelling orders for the wrong coin(s)")
+                        return False
+
             # Correct XPATH for Cancel All button
             cancel_all_span_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button/span"
             cancel_all_button_xpath = "//*[@id='root']/div[1]/div[2]/main/div/section/div[2]/div[1]/button"
-            
+
             try:
                 # Try to find the span or button element
                 cancel_button = None
@@ -2710,31 +2820,31 @@ class EnhancedOrderProcessor:
                         EC.element_to_be_clickable((By.XPATH, cancel_all_button_xpath))
                     )
                     logger.info(f"      📍 Found Cancel All button element")
-                
+
                 if not cancel_button:
                     logger.error(f"      ❌ Cancel All button not found")
                     return False
-                
+
                 # Scroll into view
                 driver.execute_script("arguments[0].scrollIntoView(true);", cancel_button)
                 time.sleep(0.5)
-                
+
                 # Click the button
                 cancel_button.click()
                 logger.info(f"      ✅ Clicked Cancel All button")
-                
+
                 # Wait for cancellation to process
                 time.sleep(2)
-                
+
                 return True
-                
+
             except TimeoutException:
                 logger.error(f"      ❌ Cancel All button not found (timeout)")
                 return False
             except Exception as e:
                 logger.error(f"      💥 Error clicking Cancel All button: {e}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"      💥 Error in cancel_all_orders_for_coin: {e}")
             return False
@@ -2862,26 +2972,52 @@ class EnhancedOrderProcessor:
             logger.error(f"      💥 Error updating orders to expired: {e}")
             return 0
     
-    async def _delete_all_bullx_entries_for_coin(self, profile_name: str, button_index: int) -> bool:
+    async def _delete_all_bullx_entries_for_coin(self, profile_name: str, button_index: int,
+                                                  coin_address: str = None, coin_name: str = None) -> bool:
         """
         Delete all BullX entries for a specific coin by repeatedly deleting row 1.
         After each deletion, rows shift up, so we always delete row 1 until none remain.
-        
+        CRITICAL: Verifies filter is correctly applied before starting deletions.
+
         Args:
             profile_name: Chrome profile name
             button_index: Filter button index for the coin
-            
+            coin_address: Expected coin address for filter verification
+            coin_name: Expected coin name for logging
+
         Returns:
             True if successful, False otherwise
         """
         try:
             driver = self.driver_manager.get_driver(profile_name)
-            
+
             # Re-click filter button to ensure correct view
             filter_success = await self._click_coin_filter_button(profile_name, button_index)
             if not filter_success:
                 logger.error(f"      ❌ Failed to click filter button")
                 return False
+
+            # CRITICAL SAFETY CHECK: Verify filter shows only the target coin
+            if coin_address:
+                verified = await self._verify_filter_applied(
+                    profile_name,
+                    expected_coin_address=coin_address,
+                    expected_coin_name=coin_name or coin_address
+                )
+                if not verified:
+                    # Retry with force click
+                    logger.warning(f"      ⚠️  Filter verification failed, retrying with force click...")
+                    filter_success = await self._click_coin_filter_button(profile_name, button_index, force=True)
+                    time.sleep(1)
+                    verified = await self._verify_filter_applied(
+                        profile_name,
+                        expected_coin_address=coin_address,
+                        expected_coin_name=coin_name or coin_address
+                    )
+                    if not verified:
+                        logger.error(f"      ❌ BULK DELETE BLOCKED: Filter verification failed after retry!")
+                        logger.error(f"      🛡️  This prevented deleting entries for the wrong coin(s)")
+                        return False
             
             # XPATH for delete button - ALWAYS row 1 since rows shift after deletion
             # After canceling, entries remain and need to be deleted one by one

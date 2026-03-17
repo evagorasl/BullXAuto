@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 import logging
+import logging.handlers
 import os
 from datetime import datetime
 
@@ -12,8 +13,40 @@ logs_dir = 'logs'
 if not os.path.exists(logs_dir):
     os.makedirs(logs_dir)
 
-# Generate log filename based on current date (format: YYYY-MM-DD.log)
+# Use TimedRotatingFileHandler for automatic daily log rotation
+# This creates a new log file at midnight each day (format: YYYY-MM-DD.log)
 log_filename = os.path.join(logs_dir, f"{datetime.now().strftime('%Y-%m-%d')}.log")
+
+# Custom namer to keep YYYY-MM-DD.log format for rotated files
+def _log_namer(default_name):
+    """Convert rotated log name to YYYY-MM-DD.log format."""
+    # default_name is like: logs/2026-03-15.log.2026-03-14
+    # We want: logs/2026-03-14.log
+    if '.' in default_name:
+        parts = default_name.rsplit('.', 1)
+        if len(parts) == 2 and len(parts[1]) == 10:  # date suffix like 2026-03-14
+            directory = os.path.dirname(parts[0])
+            return os.path.join(directory, f"{parts[1]}.log")
+    return default_name
+
+def _log_rotator(source, dest):
+    """Rotate by renaming source to dest."""
+    if os.path.exists(source):
+        os.rename(source, dest)
+
+# TimedRotatingFileHandler rotates at midnight, creating a new file each day
+file_handler = logging.handlers.TimedRotatingFileHandler(
+    log_filename,
+    when='midnight',
+    interval=1,
+    backupCount=0,  # We handle cleanup ourselves in daily_health_check
+    encoding='utf-8',
+    atTime=None
+)
+file_handler.namer = _log_namer
+file_handler.rotator = _log_rotator
+# suffix for the rotated file (used by the handler to generate the backup name)
+file_handler.suffix = "%Y-%m-%d"
 
 # Configure logging with timestamp and file output BEFORE importing any modules
 logging.basicConfig(
@@ -21,7 +54,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%d/%m/%Y-%H:%M:%S',
     handlers=[
-        logging.FileHandler(log_filename, mode='a', encoding='utf-8'),
+        file_handler,
         logging.StreamHandler()  # Keep console output as well
     ]
 )

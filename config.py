@@ -67,6 +67,7 @@ class Config:
     REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "reports")
     HEALTH_CHECK_HOUR = 7   # Hour to run the daily check (24h format)
     HEALTH_CHECK_MINUTE = 0  # Minute to run the daily check
+    LOG_RETENTION_DAYS = 7  # Delete log files older than this (health reports are kept)
     
     # Default strategy parameters
     DEFAULT_STRATEGIES = {

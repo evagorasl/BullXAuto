@@ -30,6 +30,10 @@ class DailyHealthChecker:
         "tp_detected": r"TP DETECTED",
         "orders_renewed": r"Step 4: Processing \d+ orders marked for renewal",
 
+        # SL hit and expired coin processing
+        "sl_hit_detected": r"SL hit \+ ANY expired detected",
+        "expired_coins_processed": r"EXPIRED COIN PROCESSING COMPLETED",
+
         # Deletion events
         "deletion_failed": r"Deletion FAILED",
         "deletion_blocked": r"DELETION BLOCKED",
@@ -60,6 +64,44 @@ class DailyHealthChecker:
     def _ensure_reports_dir(self):
         """Create reports directory if needed."""
         os.makedirs(self.reports_dir, exist_ok=True)
+
+    def _cleanup_old_logs(self):
+        """Delete log files older than LOG_RETENTION_DAYS. Health reports are kept."""
+        try:
+            logs_dir = "logs"
+            if not os.path.exists(logs_dir):
+                return
+
+            retention_days = config.LOG_RETENTION_DAYS
+            cutoff_date = datetime.now() - timedelta(days=retention_days)
+            deleted_count = 0
+
+            for filename in os.listdir(logs_dir):
+                filepath = os.path.join(logs_dir, filename)
+
+                # Only delete .log files (skip reports/ directory and other files)
+                if not filename.endswith('.log') or not os.path.isfile(filepath):
+                    continue
+
+                # Parse date from filename (format: YYYY-MM-DD.log)
+                try:
+                    date_str = filename.replace('.log', '')
+                    file_date = datetime.strptime(date_str, '%Y-%m-%d')
+                except ValueError:
+                    continue  # Skip files that don't match the date format
+
+                if file_date < cutoff_date:
+                    os.remove(filepath)
+                    deleted_count += 1
+                    logger.info(f"🗑️  Deleted old log file: {filename}")
+
+            if deleted_count > 0:
+                logger.info(f"✅ Log cleanup complete: deleted {deleted_count} log files older than {retention_days} days")
+            else:
+                logger.info(f"✅ Log cleanup: no log files older than {retention_days} days to delete")
+
+        except Exception as e:
+            logger.error(f"Error during log cleanup: {e}")
 
     def _get_log_file_path(self, target_date: datetime) -> str:
         """Return path to log file for a given date."""
@@ -216,6 +258,9 @@ class DailyHealthChecker:
 
         logger.info(f"Generating daily health report for {report_date_str}...")
 
+        # 0. Clean up old log files
+        self._cleanup_old_logs()
+
         # 1. Parse log file
         log_analysis = self._parse_log_file(log_file_path)
 
@@ -253,6 +298,8 @@ class DailyHealthChecker:
                 "successful_completions": log_analysis["pattern_counts"].get("processing_completed", 0),
                 "failed_processing": log_analysis["pattern_counts"].get("processing_failed", 0),
                 "tp_hits_detected": log_analysis["pattern_counts"].get("tp_detected", 0),
+                "sl_hits_detected": log_analysis["pattern_counts"].get("sl_hit_detected", 0),
+                "expired_coins_processed": log_analysis["pattern_counts"].get("expired_coins_processed", 0),
                 "renewal_batches": log_analysis["pattern_counts"].get("orders_renewed", 0),
                 "deletion_failures": log_analysis["pattern_counts"].get("deletion_failed", 0),
                 "deletion_blocks": log_analysis["pattern_counts"].get("deletion_blocked", 0),

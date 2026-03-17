@@ -1874,6 +1874,10 @@ function renderReportOrderProcessing(op) {
         '<span class="monitoring-value text-danger">' + (op.failed_processing || 0) + '</span></div>' +
         '<div class="monitoring-stat"><span class="monitoring-label">TP Hits:</span>' +
         '<span class="monitoring-value text-success">' + (op.tp_hits_detected || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">SL Hits:</span>' +
+        '<span class="monitoring-value text-danger">' + (op.sl_hits_detected || 0) + '</span></div>' +
+        '<div class="monitoring-stat"><span class="monitoring-label">Coins Expired (cancel+sell):</span>' +
+        '<span class="monitoring-value text-warning">' + (op.expired_coins_processed || 0) + '</span></div>' +
         '<div class="monitoring-stat"><span class="monitoring-label">Renewal Batches:</span>' +
         '<span class="monitoring-value">' + (op.renewal_batches || 0) + '</span></div>' +
         '<div class="monitoring-stat"><span class="monitoring-label">Deletion Failures:</span>' +
